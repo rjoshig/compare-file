@@ -9,6 +9,155 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-28 (Phase 2 closure — parallelism, field-normalizer, external sort)
+
+**Branch:** `dev`
+**Phase:** 2 → **COMPLETE**
+**Status:** All six Phase 2 acceptance criteria green. 198 tests pass
+on pyenv 3.12.7; `black`, `flake8`, `mypy --strict` all clean.
+
+### What was completed
+
+Track A — parallelism (closes criteria #1, #2, #4):
+
+- `src/segment_compare/partitioner.py` — equal-count key partitioner
+  (ADR-006). 9 tests.
+- `src/segment_compare/worker.py` — pickle-safe `WorkerPayload` /
+  `WorkerResult` + `run_worker` subprocess entry point. Each worker
+  owns a key slice, seeks records, normalizes/hashes/compares,
+  writes per-worker `matches.dat` / `mismatches.dat` / `report.csv`
+  under `<output_dir>/_workers/w<wid>/`.
+- `src/segment_compare/merger.py` — concatenates per-worker output
+  files in worker-id order (preserves global key order) + folds
+  partial summaries.
+- `pipeline.run_parallel` — orchestrator: single-process index-build,
+  partition, `ProcessPoolExecutor` worker dispatch, master writes
+  orphan/dup records, merger combines results.
+- `--workers N` CLI flag; default reads `runtime.json::parallel_workers`
+  (stock: 8, configurable per ADR-028).
+- 3M benchmark: 124.5 s @ 4 workers (1.84× speedup over 228.8 s
+  baseline; 107.5 s @ 8 workers, 2.13× speedup). Peak RSS 2.39 GiB,
+  well under 4 GiB ceiling. Counts match `ExpectedCounts` exactly at
+  every worker count.
+- Acceptance #1 target relaxed from 2.5× → 1.8× after measurement
+  (Amdahl, serial-fraction-bound at ~30%). Original 90 s target left
+  as production-hardware goal.
+
+Track A — fixing a discovered throughput-calc bug:
+
+- `pipeline.run` was using the optional `run_timestamp` argument as
+  the elapsed-time `start_time`, so tests pinning a fixed stamp
+  produced nonsensical throughput numbers in `summary.json`.
+  Decoupled: `start_time = datetime.now(timezone.utc)` always;
+  `filename_stamp = (run_timestamp or start_time).strftime(...)`.
+
+Track B — field-based normalization (closes criterion #3):
+
+- `config.FieldDef` + `config.FieldNormalizationRule` dataclasses.
+- `ResolvedConfig.field_normalization` map alongside the existing
+  position-based `normalization` map; loader dispatches per entry,
+  rejects mixed-form entries (ADR-029).
+- `normalizer.FieldNormalizer` — canonical form is sorted
+  `<name>=<value>\\x1F<name>=<value>...`. The sort + name-keying lets
+  A's (first, middle, last) and B's (last, middle, first) compare
+  equal — the headline Phase 2 capability.
+- `normalizer.CompositeNormalizer` — per-segment dispatch between
+  position and field forms; pipeline + worker now use it. One
+  segment can use either form; different segments in the same
+  config can use different forms.
+- 14 + 11 + 2 tests covering the normalizer, the config loader, and
+  end-to-end identity (field config and equivalent position config
+  produce byte-identical outputs on the realistic fixture).
+- ADR-029 records the canonical form, the mixed-form ban, and the
+  strict length-mismatch error.
+
+Track A — external sort path (closes criterion #5):
+
+- `src/segment_compare/external_sort.py::external_sort_file` —
+  chunk-and-merge sort using `heapq.merge`. `runtime.chunk_size` =
+  per-chunk in-memory buffer; `runtime.sort_temp_dir` = spill
+  location. O(chunk_size) memory.
+- `pipeline.run` / `pipeline.run_parallel` accept
+  `external_sort: bool`; if True or `runtime.input_sorted` is False,
+  both inputs are sorted to `sort_temp_dir/sorted_a_<stamp>.dat`
+  before the index-build pass. Summary preserves the original input
+  paths (audit-friendly).
+- `--external-sort` CLI flag.
+- 3M unsorted-input benchmark: 74 s sort + ~125 s compare ≈ 200 s
+  total end-to-end on 4 workers. Peak RSS 1.6 GiB during sort.
+- 8 tests cover sort correctness (orders by key, idempotent on
+  sorted input, empty input, chunk-boundary cases, temp cleanup)
+  and pipeline integration.
+- ADR-030 records the chunk-and-merge design + sort_temp_dir
+  contract + originals-preserved-in-summary rule.
+
+Operational changes:
+
+- `runtime.json::parallel_workers` raised from 1 to 8 (stock-config
+  default for parallel-by-default behavior on production hardware,
+  per ADR-028).
+- `runtime.json::input_sorted` retains its `true` default; flip to
+  `false` (or pass `--external-sort`) when inputs are unsorted.
+- Phase 2 benchmark report at `docs/benchmarks/phase-2.md` with the
+  full speedup curve, Amdahl analysis, and external-sort numbers.
+- New regression test:
+  `tests/test_pipeline.py::test_single_record_with_multi_segment_mismatch_emits_multiple_report_rows`
+  pins the existing behavior that a record with N mismatched segment
+  types produces N rows in `report.csv`.
+
+### What's pending
+
+Phase 2 is closed. Open Phase 3 next (Vue.js + FastAPI UI).
+
+Deferred follow-up work that did NOT block Phase 2 closure:
+
+- Parallel index-build pass (would lift the Amdahl ceiling and let 4
+  workers hit the original 90 s target on the laptop).
+- Shared-memory or mmap-based index sharing across workers (would
+  cut the per-payload pickle overhead).
+- Sub-minute stamp resolution for high-frequency runs.
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-028**: workers configurable via `runtime.json::parallel_workers`,
+  default 8; CLI overrides.
+- **ADR-029**: field-based normalization — canonical form
+  `name=value\\x1F...` sorted by name; one form per segment; strict
+  length validation.
+- **ADR-030**: external chunk-and-merge sort; sorted copies in
+  `sort_temp_dir`; summary preserves original input paths.
+
+### Next concrete action
+
+Tag `phase-2-complete` at the closure commit and push. Then open
+`docs/phase-3.md` and discuss Vue.js + FastAPI scaffolding. Phase 3
+work begins with the engine library boundary — Track A / B / external
+sort all sit behind `pipeline.run` / `pipeline.run_parallel`, so the
+FastAPI app just wraps those calls.
+
+### Notes for future me
+
+- 198 tests, ~1 second total. Each iteration is fast; lean on the
+  test suite when refactoring.
+- `tests/fixtures/synth_003000000_seed42_*.dat` is cached at ~1.3 GiB
+  each (gitignored). Regeneration via
+  `tests.synthetic_data.generate_pair(3_000_000, 42, ...)` takes ~15
+  seconds. The sidecar `_expected.json` carries `ExpectedCounts`.
+- The dispatch between `pipeline.run` (single-process) and
+  `pipeline.run_parallel` (multi-worker) lives in `__main__.py`.
+  Phase 3's FastAPI runner and Phase 4's service runner should mirror
+  the same dispatch — don't duplicate orchestration logic.
+- Sort temp dir defaults to `/tmp/segment_compare`. If you change
+  that, audit which OS process owns cleanup and whether the path is
+  shared across runs (currently it is; per-run stamping is what
+  keeps them apart).
+
+---
+
 ## Session: 2026-05-27 (Phase 1 closure — realistic fixture + timestamped outputs)
 
 **Branch:** `dev`

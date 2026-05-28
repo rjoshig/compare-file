@@ -8,6 +8,7 @@
 | 3M @ 4 workers peak RSS          | ≤ 4 GiB                      | 2.39 GiB       | ✅      |
 | N-worker output == 1-worker      | byte-identical .dat outputs  | identical at 1/2/4 | ✅  |
 | Field-level vs position-level    | byte-identical .dat outputs  | identical on realistic fixture | ✅ |
+| External-sort path on unsorted   | byte-identical to sorted-input baseline | 74 s @ 3M, 1.6 GiB peak | ✅ |
 
 **The original 90 s @ 4 workers laptop target was relaxed** after the
 first measurement landed (1.84× speedup, not the 2.5× the target
@@ -119,12 +120,31 @@ Acceptance criterion #3 — **green** at commit `<next>`.
 | blake2b | 4       |               |       |
 | builtin | 4       |               |       |
 
-## External-sort path (pending)
+## External-sort path
 
-3M with `input_sorted = false` (unsorted input → external sort → comparison):
+3M-record unsorted-input scenario. Source: the cached
+`synth_003000000_seed42_a.dat` fixture, shuffled in-memory and
+written out unsorted. Then sorted via
+`external_sort_file(unsorted, sorted, config)` with default
+`chunk_size = 10_000`, default `sort_temp_dir = /tmp/segment_compare`.
 
-| Stage             | Wall time (s) | Peak RSS (MiB) |
-|-------------------|--------------:|---------------:|
-| External sort     |               |                |
-| Comparison        |               |                |
-| **Total**         |               |                |
+| Metric              | Value         |
+|---------------------|--------------:|
+| Records sorted      | 2,955,017     |
+| Wall time           | **74.15 s**   |
+| Peak RSS            | **1,610 MiB** |
+| Records/sec         | 39,852        |
+| Output equality vs original sorted | byte-identical |
+
+Total end-to-end with sort + comparison @ 4 workers ≈ 74 + 125 = ~200 s
+for unsorted 3M inputs (versus 125 s when input is pre-sorted). Sort
+cost is roughly equal to comparison cost on this hardware — expected
+for an O(N log N) sort on 1.3 GiB of byte data.
+
+Notes:
+
+- Sort is serial. Parallelizing the spill phase (Track A-2 future
+  work) would cut sort time but is not required by Phase 2 acceptance.
+- Memory ceiling honored: 1.6 GiB peak << 4 GiB ceiling.
+- The chunk count is ~300 (3M / 10k). Each chunk holds one fd during
+  the merge; well under typical 1024-fd ulimits.

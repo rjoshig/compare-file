@@ -35,6 +35,7 @@ from segment_compare import __version__
 from concurrent.futures import ProcessPoolExecutor
 from segment_compare.comparator import compare_records
 from segment_compare.config import ResolvedConfig
+from segment_compare.external_sort import external_sort_file
 from segment_compare.hasher import build_hasher
 from segment_compare.merger import fold_partial_summaries, merge_worker_outputs
 from segment_compare.normalizer import CompositeNormalizer
@@ -99,6 +100,7 @@ def run(
     config: ResolvedConfig,
     output_dir: Path,
     run_timestamp: datetime | None = None,
+    external_sort: bool = False,
 ) -> Summary:
     """Execute one end-to-end comparison and return its :class:`Summary`.
 
@@ -132,6 +134,10 @@ def run(
     start_time = datetime.now(timezone.utc)
     filename_stamp = (run_timestamp or start_time).strftime(STAMP_FORMAT)
     logger.info("starting comparison: %s vs %s (stamp=%s)", file_a, file_b, filename_stamp)
+
+    original_file_a, original_file_b = file_a, file_b
+    if external_sort or not config.runtime.input_sorted:
+        file_a, file_b = _external_sort_inputs(file_a, file_b, config, filename_stamp)
 
     index_a, dups_a, total_a, segments_a = _index_file(file_a, config)
     index_b, dups_b, total_b, segments_b = _index_file(file_b, config)
@@ -195,10 +201,10 @@ def run(
         )
 
         summary = Summary(
-            file_a_path=file_a,
-            file_b_path=file_b,
-            file_a_size_bytes=file_a.stat().st_size,
-            file_b_size_bytes=file_b.stat().st_size,
+            file_a_path=original_file_a,
+            file_b_path=original_file_b,
+            file_a_size_bytes=original_file_a.stat().st_size,
+            file_b_size_bytes=original_file_b.stat().st_size,
             file_a_record_count=total_a,
             file_b_record_count=total_b,
             keys_in_a_only=len(only_a_keys),
@@ -237,6 +243,7 @@ def run_parallel(
     output_dir: Path,
     workers: int,
     run_timestamp: datetime | None = None,
+    external_sort: bool = False,
 ) -> Summary:
     """Multi-worker variant of :func:`run`.
 
@@ -288,6 +295,10 @@ def run_parallel(
         workers,
         filename_stamp,
     )
+
+    original_file_a, original_file_b = file_a, file_b
+    if external_sort or not config.runtime.input_sorted:
+        file_a, file_b = _external_sort_inputs(file_a, file_b, config, filename_stamp)
 
     index_a, dups_a, total_a, segments_a = _index_file(file_a, config)
     index_b, dups_b, total_b, segments_b = _index_file(file_b, config)
@@ -369,10 +380,10 @@ def run_parallel(
     )
 
     summary = Summary(
-        file_a_path=file_a,
-        file_b_path=file_b,
-        file_a_size_bytes=file_a.stat().st_size,
-        file_b_size_bytes=file_b.stat().st_size,
+        file_a_path=original_file_a,
+        file_b_path=original_file_b,
+        file_a_size_bytes=original_file_a.stat().st_size,
+        file_b_size_bytes=original_file_b.stat().st_size,
         file_a_record_count=total_a,
         file_b_record_count=total_b,
         keys_in_a_only=len(only_a_keys),
@@ -500,6 +511,27 @@ def _write_key_only(
             off, length = index[key]
             rec = _read_record_at(fh, off, length, config)
             write_fn(rec)  # type: ignore[operator]
+
+
+def _external_sort_inputs(
+    file_a: Path, file_b: Path, config: ResolvedConfig, filename_stamp: str
+) -> tuple[Path, Path]:
+    """Sort both inputs via the external-sort pass and return the sorted paths.
+
+    The sorted copies land in ``config.runtime.sort_temp_dir`` with names
+    keyed by ``filename_stamp`` so concurrent runs in the same temp
+    directory don't collide. The originals are not modified; callers
+    use the returned paths for the rest of the pipeline.
+    """
+    sort_dir = config.runtime.sort_temp_dir
+    sort_dir.mkdir(parents=True, exist_ok=True)
+    sorted_a = sort_dir / f"sorted_a_{filename_stamp}.dat"
+    sorted_b = sort_dir / f"sorted_b_{filename_stamp}.dat"
+    logger.info("external-sort: %s -> %s", file_a, sorted_a)
+    external_sort_file(file_a, sorted_a, config)
+    logger.info("external-sort: %s -> %s", file_b, sorted_b)
+    external_sort_file(file_b, sorted_b, config)
+    return sorted_a, sorted_b
 
 
 def _build_per_segment_summary(

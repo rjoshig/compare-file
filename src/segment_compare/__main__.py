@@ -95,10 +95,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if workers > 1:
             summary = run_parallel(
-                args.file_a, args.file_b, config, args.output_dir, workers=workers
+                args.file_a,
+                args.file_b,
+                config,
+                args.output_dir,
+                workers=workers,
+                external_sort=args.external_sort,
             )
         else:
-            summary = run(args.file_a, args.file_b, config, args.output_dir)
+            summary = run(
+                args.file_a,
+                args.file_b,
+                config,
+                args.output_dir,
+                external_sort=args.external_sort,
+            )
     except InputFileError as exc:
         sys.stderr.write(f"input error: {exc}\n")
         return EXIT_INPUT_NOT_FOUND
@@ -164,6 +175,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "stock config). Pass --workers 1 to force the single-process "
             "Phase 1 code path. Output is byte-identical across worker "
             "counts modulo timings."
+        ),
+    )
+    parser.add_argument(
+        "--external-sort",
+        action="store_true",
+        help=(
+            "Force an external chunk-and-merge sort pass on both inputs "
+            "before comparison. By default the engine follows "
+            "runtime.json::input_sorted (true → skip sort, assume inputs "
+            "are pre-sorted by key). Pass this flag when input order is "
+            "unknown or known-unsorted. Sorted copies land in "
+            "runtime.json::sort_temp_dir as sorted_a_<stamp>.dat / "
+            "sorted_b_<stamp>.dat."
         ),
     )
     parser.add_argument(

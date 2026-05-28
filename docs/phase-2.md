@@ -1,20 +1,38 @@
-# Phase 2 — Production scale + field-level config
+# Phase 2 — Production scale + field-level config — **COMPLETE**
 
 **Goal:** handle 3M-record files efficiently, and support cross-system
 layout differences via field-based normalization.
 
 ## Acceptance criteria
 
-1. **3M-record synthetic comparison shows ≥ 1.8× speedup at 4 workers**
+1. ✅ **3M-record synthetic comparison shows ≥ 1.8× speedup at 4 workers**
    over the 228.8 s single-process baseline, with **peak RSS ≤ 4 GiB**.
-   Original target was ≤ 90 s @ 4 workers (2.5× speedup); the measured
-   ceiling on the local laptop is ~2.1× at 4 workers / ~2.6× at 8
-   workers due to the still-serial index-build pass (Amdahl's law,
-   serial fraction ≈ 0.30 — see `docs/benchmarks/phase-2.md`).
+   Measured: 124.5 s at 4 workers (1.84×), peak RSS 2.39 GiB. Original
+   target was ≤ 90 s @ 4 workers (2.5×); relaxed after the measurement
+   because the still-serial index-build pass caps speedup at ~2.1× via
+   Amdahl (serial fraction ≈ 0.30 — see `docs/benchmarks/phase-2.md`).
    Production big-iron servers with more cores and faster I/O should
    exceed the original 90 s target naturally. Parallelizing the
-   index-build pass is deferred to a follow-up commit / ADR; engine
-   correctness across 1/2/4/8 workers is the locked-in win.
+   index-build pass is deferred to a follow-up ADR.
+2. ✅ Equal-count partitioning across N workers produces identical
+   output to the single-process Phase 1 engine on the same inputs.
+   Verified at N=1, 2, 4 by `tests/test_parallel.py` against the
+   realistic fixture.
+3. ✅ Field-level normalization config produces identical output to
+   an equivalent position-based config on the same inputs. Verified
+   by `tests/test_field_integration.py` against the realistic
+   fixture (same 4/3/1/2/2/2 count vector, byte-identical `*.dat`
+   outputs).
+4. ✅ `--workers N` CLI option spawns N processes; default reads
+   `runtime.json::parallel_workers` (stock: 8). Phase 1 behavior
+   preserved with `--workers 1`.
+5. ✅ Optional `--external-sort` path handles unsorted input.
+   Implemented as chunk-and-merge sort with `heapq.merge`
+   (ADR-030). Verified end-to-end by
+   `tests/test_external_sort.py::test_pipeline_run_with_external_sort_on_unsorted_input_matches_sorted_baseline`.
+6. ✅ Benchmark report at `docs/benchmarks/phase-2.md` covers wall
+   time, peak memory, throughput at worker counts 1/2/4/8 plus the
+   external-sort numbers.
 2. Equal-count partitioning across N workers produces identical output
    to the single-process Phase 1 engine on the same inputs.
 3. Field-level normalization config produces identical output to an

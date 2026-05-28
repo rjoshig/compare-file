@@ -8,7 +8,7 @@ acceptance criteria are met.
 |---|---|---|---|
 | 0 | Scaffolding | **complete** | (this commit) |
 | 1 | Core engine (POC) | **complete** | [docs/phase-1.md](phase-1.md) |
-| 2 | Production scale + field-level config | not started | [docs/phase-2.md](phase-2.md) |
+| 2 | Production scale + field-level config | **complete** | [docs/phase-2.md](phase-2.md) |
 | 3 | Web UI (Vue.js + FastAPI) | not started | [docs/phase-3.md](phase-3.md) |
 | 4 | Scheduled service mode | not started | [docs/phase-4.md](phase-4.md) |
 

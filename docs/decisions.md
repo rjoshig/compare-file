@@ -657,3 +657,72 @@ working.
   If a future ADR opens the door to non-ASCII data, the encoding
   may need a small escape rule; for Phase 2's ASCII-only world,
   collisions are not possible by construction.
+
+---
+
+## ADR-030 — External chunk-and-merge sort for unsorted inputs
+
+**Status:** accepted
+
+**Context:** The Phase 1/2 inner-join assumes both inputs are sorted
+by key (ADR-013). Most production extracts are pre-sorted, but some
+sources deliver unsorted output. The architecture allowed for an
+optional pre-sort pass; Phase 2 acceptance criterion #5 makes that
+concrete.
+
+Two reasonable algorithms:
+
+1. **In-memory sort.** Load both files into memory, sort, run the
+   pipeline. Simple but bounded by RAM; fails at the 3M-record scale
+   that Phase 2 targets (~1.3 GiB per file).
+2. **External chunk-and-merge sort.** Pass 1 buffers up to
+   ``runtime.chunk_size`` records, sorts each chunk in memory, spills
+   to a temp file in ``runtime.sort_temp_dir``. Pass 2 uses
+   ``heapq.merge`` keyed on record key to interleave the spill files
+   into a single sorted output. O(N log N) compute, O(chunk_size)
+   memory.
+
+**Decision:** External chunk-and-merge sort. ``src/segment_compare/external_sort.py``
+houses ``external_sort_file(input_path, output_path, config)``. Hot
+points:
+
+- **Trigger.** `pipeline.run` and `pipeline.run_parallel` accept an
+  ``external_sort: bool`` argument; if True (CLI: ``--external-sort``)
+  OR ``config.runtime.input_sorted`` is False, both inputs are sorted
+  before the index-build pass. Sorted copies land at
+  ``runtime.sort_temp_dir / sorted_a_<stamp>.dat`` and
+  ``sorted_b_<stamp>.dat``.
+- **Originals preserved.** ``summary.json``'s ``file_a_path`` and
+  ``file_a_size_bytes`` record the *original* input paths, not the
+  sorted temp files. Auditors care about what was passed in; the
+  sort is an implementation detail.
+- **Chunk cleanup.** Temp chunk files (``chunk_*.dat`` under
+  ``sort_temp_dir``) are deleted via a ``try/finally`` even on
+  exception. The final sorted output is left on disk for the rest
+  of the pipeline to read; cleanup of that file is the caller's
+  responsibility (the run output dir is small per stamp, so this
+  is acceptable in practice).
+- **Memory.** Each spill batch is sorted with Python's Timsort on
+  ``(key, raw_bytes)`` tuples. At ``chunk_size = 10_000`` and ~500
+  bytes/record, peak buffer is ~5 MiB. The merge step holds one
+  file descriptor per chunk; 3M / 10K = 300 fds for the full
+  benchmark fixture, well under typical ulimits.
+
+**Consequences:**
+
+- 3M-record external sort takes ~74 s on the local laptop with peak
+  RSS ~1.6 GiB. Roughly the same time budget as the comparison
+  itself — sorting unsorted input doubles end-to-end wall time, as
+  expected.
+- The sort path is **serial**; it runs single-process even when
+  ``--workers > 1``. Parallelizing the spill phase is a future
+  optimization (each worker scans a byte range of input). Not
+  required by any Phase 2 acceptance criterion.
+- For files that already happen to be sorted, the sort path is a
+  no-op semantically but still costs the chunk+merge pass.
+  Operationally: leave ``input_sorted = true`` in config when
+  inputs are pre-sorted; flip it (or pass ``--external-sort``) only
+  for sources where sort order is unreliable.
+- The Phase 2 test suite verifies the sort path produces engine
+  output byte-identical to the sorted-input baseline (counts,
+  ``*.dat`` outputs, ``report.csv``).
