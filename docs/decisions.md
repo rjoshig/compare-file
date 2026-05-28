@@ -894,3 +894,186 @@ suite is green there (`black --check`, `flake8`, `mypy --strict`,
 above audit but not exercised yet — Windows contributors should run
 `pytest` once after `pip install -e ".[dev]"` and report any
 regression so this ADR can be amended.
+
+---
+
+## ADR-033 — Single per-file layout config replaces segments.json + normalization.json
+
+**Status:** accepted (Stage 1: schema landed); supersedes **ADR-007**
+(position-vs-field normalization split), **ADR-008** (per-segment
+normalization rules), and **ADR-029** (field-based normalization with
+position fallback). Stages 2 and 3 land the loader and engine cutover.
+
+**Context:** The user described the existing two-file config
+(`segments.json` for the catalog/parser knobs + `normalization.json`
+for per-segment strip/exclude rules) as too low-level for humans
+operating real-world feeds. The mental model an operator actually
+holds is *"this file contains these segments, each carrying these
+fields"* — not *"strip byte range [11, 19) from File A's CL01."*
+Splitting framing knobs across two files also forced cross-file
+reasoning for any layout change.
+
+Five concrete pain points motivated the redesign:
+
+1. The global `key_range` in `segments.json` assumed File A and File B
+   put the record key at the *same* physical position inside TU4R.
+   Real feeds may not.
+2. Position-based normalization (`file_a_strip`, `exclude_positions`)
+   required hand-counting byte offsets every time field widths changed.
+3. There was no place to declare that File A is sorted while File B
+   isn't — `runtime.input_sorted` was global.
+4. RDW + per-file parser knobs (ADR-031) were starting to grow per-file
+   sections inside the global parser block, foreshadowing more
+   per-file divergence.
+5. New layouts required onboarding two files (`segments.json` +
+   `normalization.json`); easy to forget either.
+
+**Decision:** Replace `config/segments.json` and `config/normalization.json`
+with two per-file layout files:
+
+- `config/layout_file_A.json`
+- `config/layout_file_B.json`
+
+Each file declares everything that is specific to its input: byte-level
+parser knobs, optional `strip_leading_bytes`, optional `rdw`, sort
+order, and an ordered list of segments with per-segment `size` and
+per-field `name`/`length`/`exclude`/`key` flags. `config/runtime.json`
+keeps its run-wide knobs (`hash_method`, `parallel_workers`,
+`sort_temp_dir`, `chunk_size`, `partition_strategy`); the file-specific
+sort knobs (`input_sorted`, `key_type`, `key_sort_order`) migrate into
+the per-file `sort` block.
+
+### Canonical schema
+
+```jsonc
+{
+  "file_format": {
+    "segment_name_bytes":   4,
+    "size_field_bytes":     3,
+    "size_encoding":        "ascii_int",
+    "size_includes_header": true,
+    "data_encoding":        "ascii",
+    "record_delimiter":     "\n"
+  },
+
+  "strip_leading_bytes": null,          // OR { "size": N, "encoding": "binary"|"ascii" } — consumed per record before RDW
+  "rdw":                 null,          // OR { "rdw1_bytes": N, "rdw2_bytes": M, "encoding": "binary_le_uint"|"ascii_int" }
+
+  "sort": {
+    "input_sorted": true,
+    "order":        "ascending",
+    "key_type":     "alphanumeric"
+  },
+
+  "segments": [
+    { "name": "TU4R", "role": "key", "size": 30, "fields": [
+        { "name": "data_prefix",   "length": 4,  "exclude": true },
+        { "name": "account_nbr",   "length": 12, "key":     true },
+        { "name": "source_branch", "length": 7                   }
+    ]},
+    /* ... more segments ... */
+    { "name": "ENDS", "role": "end", "size": 10, "fields": [
+        { "name": "segment_count", "length": 3, "exclude": true  }
+    ]}
+  ]
+}
+```
+
+### Key design rules
+
+1. **Default `exclude: false`.** Every field is compared by default;
+   excluded fields must be flagged explicitly. Filler / padding /
+   timestamp / segment-count bytes get an explicit named entry with
+   `exclude: true` so the layout double-documents what every byte
+   represents.
+2. **Field-name = comparison anchor.** Fields with the same name in
+   File A and File B compare regardless of physical order. Fields
+   named in only one file drop from that segment's comparison (the
+   same equivalence relation as ADR-029's `FieldNormalizer`).
+3. **Per-segment `size` required and validated at load.** Invariant:
+   `size == header_bytes + sum(field.length for field in fields)`
+   where `header_bytes = segment_name_bytes + size_field_bytes`.
+   Catches field-length typos the moment the JSON is saved.
+4. **Exactly one segment with `role: "key"` and exactly one with
+   `role: "end"`** — role-marked so reordering the `segments` array
+   for readability cannot accidentally re-frame the record.
+5. **Exactly one field with `key: true`**, which must live inside the
+   role:key segment. That field's value (extracted by accumulating the
+   preceding field lengths) becomes the record key. **The global
+   `key_range` config disappears**; the key location is per-file by
+   construction.
+6. **`repeats` is intentionally absent.** Segment cardinality is
+   discovered at parse time and handled by multiset comparison; any
+   declared cardinality would be informational only and risks
+   misleading readers into thinking it's enforced. Segment list order
+   in `segments[]` is also documentation-only — the parser is
+   order-agnostic for non-role segments.
+7. **`strip_leading_bytes` is per-record** (same lifecycle as RDW),
+   not per-file. Order on the wire becomes
+   `[strip_leading_bytes][rdw][TU4R]…[ENDS][delimiter]`. `encoding`
+   is informational (skip is byte-count-driven); `null` = no skip.
+8. **`sort` is per-file** so File A can be pre-sorted while File B
+   needs the external-sort pass.
+
+### Load-time invariants (all raise ConfigError)
+
+- File-level: `file_format`, `sort`, and `segments` present;
+  `segments` non-empty.
+- Roles: exactly one `role: "key"`, exactly one `role: "end"`,
+  key segment not equal to end segment.
+- Key field: exactly one `key: true` across all fields; it sits inside
+  the role:key segment.
+- Per-segment: `size > 0`, `size == header_bytes + sum(field.length)`,
+  every `field.length > 0`, field names unique within the segment.
+- `strip_leading_bytes` (if present): `size > 0`, encoding in
+  `{binary, ascii}`.
+- `rdw` (if present): both `rdw{1,2}_bytes > 0`, encoding in
+  `{ascii_int, binary_le_uint}`.
+- `sort`: `input_sorted` boolean; `order` in `{ascending, descending}`;
+  `key_type` in `{alphanumeric, numeric}`.
+
+### Migration intent
+
+This ADR is split across three stages so the human-facing artifact
+lands before any engine churn:
+
+- **Stage 1 (this commit):** sample `config/layout_file_A.json` and
+  `config/layout_file_B.json` describe the existing
+  `examples/sample_a.dat` / `sample_b.dat` realistic fixture exactly.
+  ADR captures the design. **No engine code changes; the suite still
+  passes via the existing loader.**
+- **Stage 2:** add `FileLayout` / `SegmentLayout` / `FieldLayout` /
+  `StripConfig` dataclasses and `load_file_layout()`. Old loader
+  untouched. New loader gets its own test file.
+- **Stage 3:** engine cuts over. Pipeline, normalizer, worker,
+  external_sort consume `FileLayout`. `config/segments.json` and
+  `config/normalization.json` are deleted. Position-based
+  normalization (`file_a_strip`, `exclude_positions`,
+  `PositionNormalizer`, `NormalizationRule`) is removed entirely —
+  field-based is the only form. All 212 tests migrated. CLI
+  `--config-dir` semantics: directory now expected to contain
+  `layout_file_A.json` + `layout_file_B.json` + `runtime.json`.
+
+**Consequences:**
+
+- Operators describe a feed by walking its actual byte layout once.
+  Future feeds = one new layout file, no normalization-rule
+  cross-reference.
+- The position-based form goes away. The two integrations the engine
+  exercises today (`test_field_integration.py` for field-based;
+  the position-based path for everything else) collapse into one
+  field-based code path under `FileLayout`.
+- ADR-016's "pluggable parser knobs from day one" idea matures into
+  per-file parser blocks. Most knobs become per-file (real feeds may
+  diverge); the run-wide ones (hash method, worker count, sort temp
+  dir, chunk size, partition strategy) stay in `runtime.json`.
+- ADRs 007, 008, and 029 are superseded once Stage 3 lands. ADR-031
+  (per-file RDW) is absorbed: the `rdw` block now sits inside each
+  layout file rather than as a sibling under `segments.json::parser`,
+  but the on-wire contract is unchanged.
+- The audit hash (ADR-017) continues to identify the config bundle;
+  in Stage 3 it covers `layout_file_A.json`, `layout_file_B.json`,
+  and `runtime.json`.
+- A future "validate cardinality" feature (e.g., enforce that every
+  record has exactly one NM01) would slot in as a per-segment
+  optional `cardinality` field, not by re-introducing `repeats`.

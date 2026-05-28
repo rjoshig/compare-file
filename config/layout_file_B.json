@@ -1,0 +1,87 @@
+{
+  "$comment": "Layout of File B for the realistic 11-record fixture (examples/sample_b.dat). Structurally identical to layout_file_A.json today — File A and File B share the same physical layout for this fixture. The schema supports A and B differing on RDW, sort, segment field ordering/lengths, and per-segment field counts; this fixture exercises none of those (cross-system reconciliation lives in the test_field_integration.py case once Stage 3 migrates it).",
+
+  "file_format": {
+    "segment_name_bytes":   4,
+    "size_field_bytes":     3,
+    "size_encoding":        "ascii_int",
+    "size_includes_header": true,
+    "data_encoding":        "ascii",
+    "record_delimiter":     "\n"
+  },
+
+  "strip_leading_bytes": null,
+  "rdw":                 null,
+
+  "sort": {
+    "input_sorted": true,
+    "order":        "ascending",
+    "key_type":     "alphanumeric"
+  },
+
+  "segments": [
+    {
+      "name": "TU4R",
+      "role": "key",
+      "size": 30,
+      "fields": [
+        { "name": "data_prefix",   "length": 4,  "exclude": true              },
+        { "name": "account_nbr",   "length": 12, "key":     true              },
+        { "name": "source_branch", "length": 7                                }
+      ]
+    },
+    {
+      "name": "SH01",
+      "size": 35,
+      "fields": [
+        { "name": "status_block", "length": 11                                },
+        { "name": "padding",      "length": 17, "exclude": true               }
+      ]
+    },
+    {
+      "name": "NM01",
+      "size": 57,
+      "fields": [
+        { "name": "first_name",  "length": 20                                 },
+        { "name": "middle_name", "length": 15                                 },
+        { "name": "last_name",   "length": 15                                 }
+      ]
+    },
+    {
+      "name": "TR01",
+      "size": 50,
+      "$comment": "TR01 may appear 1..N times per record.",
+      "fields": [
+        { "name": "txn_prefix", "length": 27                                  },
+        { "name": "txn_ref",    "length": 10                                  },
+        { "name": "padding",    "length": 6,  "exclude": true                 }
+      ]
+    },
+    {
+      "name": "SC01",
+      "size": 34,
+      "fields": [
+        { "name": "score_code", "length": 10                                  },
+        { "name": "padding",    "length": 17, "exclude": true                 }
+      ]
+    },
+    {
+      "name": "CL01",
+      "size": 67,
+      "fields": [
+        { "name": "classifier",  "length": 11                                 },
+        { "name": "opened_date", "length": 8,  "exclude": true                },
+        { "name": "status_flag", "length": 2                                  },
+        { "name": "padding",     "length": 39, "exclude": true                }
+      ]
+    },
+    {
+      "name": "ENDS",
+      "role": "end",
+      "size": 10,
+      "fields": [
+        { "name": "segment_count", "length": 3,  "exclude": true              }
+      ]
+    }
+  ]
+}
