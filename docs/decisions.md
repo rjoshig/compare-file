@@ -410,8 +410,8 @@ engine".
 
 ## ADR-025 — Python 3.12+ via pyenv (supersedes ADR-020 on Python version)
 
-**Status:** accepted, supersedes ADR-020 (Python version only; pytest /
-black / flake8 / mypy decisions from ADR-020 still stand)
+**Status:** superseded by ADR-032 (floor lowered back to 3.10+); pyenv
+3.12.7 remains the Mac dev pin per ADR-032
 
 **Context:** ADR-020 set the floor at Python 3.10+. Development is now
 standardized on pyenv with Python 3.12 or newer. 3.12 brings
@@ -810,3 +810,87 @@ Pipeline wiring:
   absence, validation errors, example file loads), and an end-to-end
   pipeline test comparing an RDW-prefixed File A with a plain File B.
   Total suite: **212 tests passing**.
+
+---
+
+## ADR-032 — Python floor lowered to 3.10+ for cross-platform contribution (supersedes ADR-025 on the floor)
+
+**Status:** accepted, supersedes ADR-025 on the supported Python version
+only. ADR-020's pytest / black / flake8 / mypy strict tooling decisions
+remain in effect.
+
+**Context:** ADR-025 raised the floor to Python 3.12+ in part to align
+with the Mac maintainer's pyenv-managed 3.12.7. A Windows contributor
+running stock Python 3.11.1 cannot install the package because of the
+`requires-python = ">=3.12"` constraint, and `pyenv-win` is not always
+available in their environment. Separately, the production server
+ships Python 3.6.5 with no install path; that constraint is out of
+scope here and tracked under its own follow-up (see the 2026-05-28
+session log).
+
+A code audit confirmed the engine uses **no** 3.11- or 3.12-specific
+syntax:
+
+- Every module imports `from __future__ import annotations`, so
+  `list[str]` / `X | None` / `tuple[int, int]` annotations are stored
+  as strings at runtime — they work on 3.7+.
+- The only 3.10+ language feature actually exercised is
+  `@dataclass(slots=True)` (used throughout `parser.py`, `config.py`,
+  `writer.py`, etc.).
+- No `tomllib`, no `typing.Self`, no `typing.override`, no
+  `ExceptionGroup` / `except*`, no PEP 695 generic syntax, no `match`
+  statements.
+
+So the floor can drop to 3.10 without touching code.
+
+**Decision:** Lower the supported Python floor from 3.12+ back to
+**3.10+** (3.10, 3.11, 3.12, and 3.13 are all supported). pyenv 3.12.7
+remains the **recommended** local pin for the Mac maintainer (it is
+the only interpreter the test suite has been run against), but is no
+longer a hard requirement.
+
+Tooling updates:
+
+- `pyproject.toml::requires-python` → `>=3.10`
+- `pyproject.toml::classifiers` → 3.10, 3.11, 3.12, 3.13; added
+  classifiers for macOS and Windows operating systems.
+- `[tool.black]::target-version` → `["py310", "py311", "py312",
+  "py313"]`
+- `[tool.mypy]::python_version` → `"3.10"` (mypy still type-checks
+  under strict mode; lowering the target makes it flag accidental
+  use of newer-than-3.10 syntax during review).
+
+Docs updates:
+
+- `README.md` — split Setup into Mac/Linux (pyenv) and Windows
+  (PowerShell stock Python) subsections; added a "Production server"
+  subsection that explicitly calls out the 3.6 gap as out-of-scope.
+- `CLAUDE.md` — supported Python is now "3.10+, Mac dev pinned to
+  3.12.7"; the version-drift warning is scoped to the Mac dev box.
+
+**Consequences:**
+
+- Windows contributors with stock Python 3.10/3.11/3.12 can now
+  `pip install -e ".[dev]"` without changes.
+- The Mac dev box stays on 3.12.7 via pyenv; nothing about the local
+  workflow changes day-to-day.
+- 3.10/3.11/3.12-specific syntax going forward must respect the 3.10
+  floor. mypy's `python_version = "3.10"` setting enforces this in
+  type-check; black formats consistently for all four targets.
+- CI was not configured to run a matrix yet; if/when CI lands, it
+  should test on 3.10 and 3.13 at minimum to keep the floor and
+  ceiling honest.
+- The production server's Python 3.6.5 + no-install constraint is
+  **not** addressed by this ADR. A future ADR will pick between
+  PyInstaller, python-build-standalone, and a container approach
+  when prod deployment becomes a priority. Backporting the engine to
+  3.6 is rejected outright: missing `dataclasses`, missing
+  `from __future__ import annotations`, missing `slots=True`, and an
+  interpreter that has had no security patches since 2021.
+
+**Verification on 3.10/3.11/3.12:** the Mac dev box runs 3.12.7 and the
+suite is green there (`black --check`, `flake8`, `mypy --strict`,
+`pytest` 212 passing). The 3.10 / 3.11 paths are inferred from the
+above audit but not exercised yet — Windows contributors should run
+`pytest` once after `pip install -e ".[dev]"` and report any
+regression so this ADR can be amended.

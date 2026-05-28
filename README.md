@@ -50,8 +50,9 @@ implemented yet. See `docs/phase-plan.md` for the roadmap and
 
 ## Setup
 
-Requires **Python 3.12+**. The project standardizes on **pyenv** with
-`3.12.7` pinned locally:
+Requires **Python 3.10+** (3.10, 3.11, 3.12, or 3.13 — see ADR-032).
+
+### Mac / Linux (pyenv, pinned to 3.12.7)
 
 ```bash
 pyenv install 3.12.7      # one-time, if not already installed
@@ -60,13 +61,32 @@ pyenv local 3.12.7        # writes .python-version
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-```
-
-Verify the interpreter once activated:
-
-```bash
 python --version          # Python 3.12.7
 ```
+
+### Windows (PowerShell, stock Python 3.10/3.11/3.12)
+
+No pyenv required. Install Python 3.10 or newer from python.org (check
+"Add python.exe to PATH"), then:
+
+```powershell
+python --version          # should print 3.10.x or newer
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+```
+
+If `Activate.ps1` is blocked by execution policy, run once per shell:
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`.
+
+### Production server (Python 3.6, no install allowed)
+
+Not currently supported. Python 3.6 is missing `dataclasses`,
+`from __future__ import annotations`, and `dataclass(slots=True)` — all
+of which the engine uses pervasively. Options for that environment
+(self-contained binary via PyInstaller, or shipping a
+python-build-standalone CPython tree alongside the app) have not been
+wired up yet; raise this when you're ready to tackle it.
 
 ## CLI usage
 

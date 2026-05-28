@@ -9,6 +9,98 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-28 (Python floor lowered to 3.10+ for Windows compat)
+
+**Branch:** `dev`
+**Phase:** N/A — toolchain change
+**Status:** 212 tests still pass on pyenv 3.12.7; black / flake8 / mypy
+clean. Windows 3.11 / 3.10 paths not yet exercised in CI but the code
+audit confirms no 3.11+ syntax is used.
+
+### What was completed
+
+User reported running Python 3.11.1 on Windows. The `requires-python =
+">=3.12"` pin from ADR-025 blocked them. A code audit found the engine
+uses no 3.11- or 3.12-specific syntax (no `tomllib`, `typing.Self`,
+`typing.override`, `ExceptionGroup`, `except*`, PEP 695 generics, or
+`match` statements). The only 3.10+ language feature actually used is
+`@dataclass(slots=True)`, so 3.10 is the real floor.
+
+Changes:
+
+- `pyproject.toml` — `requires-python` → `>=3.10`; classifiers expanded
+  to 3.10/3.11/3.12/3.13 plus macOS and Windows OS classifiers; black
+  target-version → `["py310", "py311", "py312"]` (py313 dropped to
+  silence the safety-check warning when running on a 3.12 interpreter);
+  mypy `python_version` → `"3.10"`.
+- `CLAUDE.md` — "Supported Python: 3.10+ (Mac dev pinned to 3.12.7 via
+  pyenv)". The pyenv sanity-check block is now scoped to Mac dev.
+- `README.md` — Setup split into "Mac / Linux (pyenv 3.12.7)" and
+  "Windows (PowerShell, stock Python 3.10+)" with the latter showing
+  `python -m venv .venv` / `.venv\Scripts\Activate.ps1` /
+  `pip install -e ".[dev]"`. Added a "Production server (Python 3.6,
+  no install allowed)" subsection that explicitly punts that
+  environment — see "Pending" below.
+- `docs/decisions.md` — added **ADR-032** (floor → 3.10+) and marked
+  ADR-025 as superseded on the floor only. ADR-020's pytest / black /
+  flake8 / mypy strict decisions remain in effect.
+
+### What's pending
+
+**Prod-server (Python 3.6.5, no install allowed) is unresolved.**
+User chose to punt this. When it becomes a priority, the realistic
+options are (in order of preference):
+
+1. **PyInstaller** — single-file binary bundling a 3.12 interpreter +
+   the engine. No system Python touched.
+2. **python-build-standalone** — drop a static CPython tree alongside
+   the app; invoke via the bundled interpreter. Easier to debug than
+   a frozen binary.
+3. **Docker / Podman** if container runtime is available on prod.
+
+Backporting the engine to 3.6 is rejected per ADR-032: 3.6 is missing
+`dataclasses` (used in every module), `from __future__ import
+annotations` (first line of every file), and `dataclass(slots=True)`.
+3.6 has also had no security patches since 2021.
+
+Phase 3 kickoff (FastAPI scaffolding) is still pending — unchanged from
+the earlier handoff entry.
+
+### Blockers
+
+None for the floor change. The prod-server work has an unresolved
+constraint (no install possible) and is tracked above.
+
+### Decisions captured this session
+
+- **ADR-032**: Python floor lowered from 3.12+ back to 3.10+. pyenv
+  3.12.7 remains the Mac dev pin (recommended, no longer required).
+  ADR-025 superseded on the floor only; ADR-020 tooling decisions
+  still stand.
+
+### Next concrete action
+
+If the user reports the suite green on their Windows 3.11.1 box after
+`pip install -e ".[dev]"` + `pytest`, the cross-platform claim in
+ADR-032 is verified and we can resume the Phase 3 handoff plan below.
+Otherwise: investigate the regression and amend ADR-032 with the
+narrower supported set.
+
+### Notes for future me
+
+- mypy's `python_version = "3.10"` flags accidental newer-syntax use
+  during review even though the dev box runs 3.12.7. That's the
+  cheapest enforcement available without a CI matrix.
+- The single black warning we used to see ("Python 3.12 cannot parse
+  code formatted for Python 3.13") is gone now that py313 is out of
+  the target list. If a 3.13-only contributor needs it back, the
+  warning is harmless when they're running on 3.13 themselves.
+- The 3.6 prod story will need a real decision before Phase 4 (the
+  scheduled-service deliverable) lands — that's the phase that
+  actually ships to prod.
+
+---
+
 ## Session: 2026-05-28 (per-file RDW prefix support)
 
 **Branch:** `dev`

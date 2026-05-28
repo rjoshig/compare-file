@@ -49,27 +49,31 @@ Before starting work on phase N, read `docs/phase-N.md` end to end.
 
 ## Local environment
 
-- Python version is managed with **pyenv**. Pinned version: **3.12.7**
-  (set via `pyenv local 3.12.7` / `~/.python-version` resolves to
-  `~/.pyenv/versions/3.12.7`). The active interpreter is
-  `~/.pyenv/shims/python`.
-- Quick sanity checks before starting work:
+- **Supported Python**: 3.10+ (any of 3.10 / 3.11 / 3.12 / 3.13 works).
+  Mac dev machine is pinned to **3.12.7** via pyenv (`~/.python-version`
+  resolves to `~/.pyenv/versions/3.12.7`); the active interpreter on
+  that machine is `~/.pyenv/shims/python`. Windows contributors can
+  use stock Python 3.10/3.11/3.12 without pyenv. See ADR-032 for the
+  floor decision.
+- Quick sanity checks before starting work (Mac, pyenv):
   ```bash
   pyenv version          # should show 3.12.7 (set by ...)
   which python           # should show ~/.pyenv/shims/python
-  python --version       # should show Python 3.12.7
+  python --version       # should show Python 3.12.x
   ```
-- If `pyenv version` reports anything other than 3.12.7 in this
-  directory, fix that before running tests — version drift is a more
-  common source of mysterious test failures than actual bugs.
+- If `pyenv version` reports anything other than 3.12.7 on the Mac dev
+  box, fix that before running tests — version drift is a more common
+  source of mysterious test failures than actual bugs. On Windows, any
+  `python --version` ≥ 3.10 is fine.
 - Virtualenv layout: `.venv/` at repo root (gitignored). Recreate with
   `python -m venv .venv && source .venv/bin/activate && pip install -e
   ".[dev]"` when needed.
 
 ## Code conventions
 
-- Python 3.12+ (pyenv 3.12.7 is the pinned local version), type hints
-  on every function signature, Google-style
+- Python 3.10+ (Mac dev pinned to 3.12.7 via pyenv; Windows / other
+  contributors can use 3.10 / 3.11 / 3.12 / 3.13 — see ADR-032).
+  Type hints on every function signature, Google-style
   docstrings on every public function and class.
 - Use `pathlib.Path` for filesystem paths, never string concatenation.
 - Use `logging` module — never `print()`.
