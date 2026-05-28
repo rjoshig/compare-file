@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import logging
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
@@ -43,6 +44,42 @@ logger = logging.getLogger(__name__)
 
 class InputFileError(Exception):
     """Raised when an input file is missing or unreadable."""
+
+
+@dataclass(frozen=True, slots=True)
+class DryRunReport:
+    """Per-file counts produced by :func:`dry_run`.
+
+    Attributes:
+        file_a_records: Number of records parsed from File A.
+        file_b_records: Number of records parsed from File B.
+        dups_in_a: Total duplicate-key occurrences in File A.
+        dups_in_b: Total duplicate-key occurrences in File B.
+    """
+
+    file_a_records: int
+    file_b_records: int
+    dups_in_a: int
+    dups_in_b: int
+
+
+def dry_run(file_a: Path, file_b: Path, config: ResolvedConfig) -> DryRunReport:
+    """Parse both inputs without comparing or writing outputs.
+
+    Surfaces parse errors and duplicate-key counts early so an operator
+    can validate inputs before paying for a full comparison.
+    """
+    for path in (file_a, file_b):
+        if not path.exists():
+            raise InputFileError(f"input file does not exist: {path}")
+    _, dups_a, total_a, _ = _index_file(file_a, config)
+    _, dups_b, total_b, _ = _index_file(file_b, config)
+    return DryRunReport(
+        file_a_records=total_a,
+        file_b_records=total_b,
+        dups_in_a=sum(len(v) for v in dups_a.values()),
+        dups_in_b=sum(len(v) for v in dups_b.values()),
+    )
 
 
 def run(
