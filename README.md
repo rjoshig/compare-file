@@ -68,7 +68,7 @@ Verify the interpreter once activated:
 python --version          # Python 3.12.7
 ```
 
-## CLI usage (target, when Phase 1 code lands)
+## CLI usage
 
 ```bash
 python -m segment_compare \
@@ -77,6 +77,27 @@ python -m segment_compare \
     --config-dir config/ \
     --output-dir results/
 ```
+
+Output files are timestamped `<base>_YYYYMMDDHHMM.<ext>` (UTC) so
+successive runs don't clobber each other — see **ADR-027**.
+
+### Parallelism is configurable
+
+The Phase 2 parallel pipeline is on by default. The worker count
+is read from `config/runtime.json::parallel_workers` (stock default:
+**8**). To override per-invocation:
+
+```bash
+# Force single-process (Phase 1 path)
+python -m segment_compare --workers 1 ...
+
+# Use 4 workers for this run, ignoring the config default
+python -m segment_compare --workers 4 ...
+```
+
+Order of precedence: **CLI flag > config file**. See **ADR-028** for
+why 8 is the default and **`docs/benchmarks/phase-2.md`** for the
+measured speedup curve.
 
 ## Repository layout
 

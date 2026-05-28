@@ -85,10 +85,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_OK
 
+    # CLI flag overrides config; if --workers wasn't given we use the
+    # runtime.json default (configurable per ADR-028).
+    workers = args.workers if args.workers is not None else config.runtime.parallel_workers
+    if workers < 1:
+        sys.stderr.write(f"invalid workers value: {workers} (must be >= 1)\n")
+        return EXIT_CONFIG_ERROR
+
     try:
-        if args.workers > 1:
+        if workers > 1:
             summary = run_parallel(
-                args.file_a, args.file_b, config, args.output_dir, workers=args.workers
+                args.file_a, args.file_b, config, args.output_dir, workers=workers
             )
         else:
             summary = run(args.file_a, args.file_b, config, args.output_dir)
@@ -150,11 +157,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workers",
         type=int,
-        default=1,
+        default=None,
         help=(
-            "Number of worker processes (default: 1, single-process Phase 1 "
-            "path). Values >1 invoke the Phase 2 parallel pipeline. Output "
-            "is byte-identical to the single-process run modulo timings."
+            "Number of worker processes for the Phase 2 parallel pipeline. "
+            "Defaults to runtime.json::parallel_workers (currently 8 in the "
+            "stock config). Pass --workers 1 to force the single-process "
+            "Phase 1 code path. Output is byte-identical across worker "
+            "counts modulo timings."
         ),
     )
     parser.add_argument(

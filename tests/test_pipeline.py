@@ -295,6 +295,65 @@ def test_output_records_are_parseable_round_trip(tmp_path: Path) -> None:
     ]
 
 
+def test_single_record_with_multi_segment_mismatch_emits_multiple_report_rows(
+    tmp_path: Path,
+) -> None:
+    """One record mismatching on N segment types → N rows in report.csv.
+
+    Confirms the engine surfaces every mismatched segment type
+    independently — important for downstream consumers that filter
+    or group by segment_name. Builds a minimal record with TU4R +
+    NM01 + TR01 + ENDS in both files, then makes A and B differ on
+    BOTH NM01 (first name) AND TR01 (transaction marker). Expected
+    output: 1 mismatched record, 2 rows in report.csv (one for NM01,
+    one for TR01).
+    """
+    config = load_config(CONFIG_DIR)
+
+    def _build(key: str, first_name: str, tr01_marker: str) -> bytes:
+        # TU4R030 = 7 header + 4 "DATA" + 12 key + 7 trailer = 30
+        tu4r = f"TU4R030DATA{key}POSNYC1".encode()
+        # NM01057 = 7 header + 50 data (20 + 15 + 15)
+        nm01 = f"NM01057{first_name:<20s}M              SMITH          ".encode()
+        # TR01050 = 7 header + 27 prefix + 10 txnref + 6 fill = 50
+        prefix = f"{tr01_marker}1111111  ABCBANK 2000 4000"
+        assert len(prefix) == 27, f"prefix len {len(prefix)}"
+        tr01 = f"TR01050{prefix}TXNREF0001      ".encode()
+        # ENDS010 = 7 header + 3 data (segment count 004)
+        ends = b"ENDS010004"
+        record = tu4r + nm01 + tr01 + ends
+        assert len(record) == 30 + 57 + 50 + 10, len(record)
+        return record
+
+    a = _build("KEY000000001", "ALICE", "A")
+    b = _build("KEY000000001", "BOB", "B")
+    (tmp_path / "a.dat").write_bytes(a + b"\n")
+    (tmp_path / "b.dat").write_bytes(b + b"\n")
+
+    out = tmp_path / "out"
+    summary = run(
+        file_a=tmp_path / "a.dat",
+        file_b=tmp_path / "b.dat",
+        config=config,
+        output_dir=out,
+        run_timestamp=FIXED_TS,
+    )
+
+    assert summary.records_matched == 0
+    assert summary.records_mismatched == 1
+
+    rows = _stamped(out, "report.csv").read_text().splitlines()
+    assert rows[0] == "key,segment_name,status,a_count,b_count"
+    body_rows = rows[1:]
+    assert len(body_rows) == 2, f"expected 2 report rows, got: {body_rows}"
+
+    # Both rows reference the same key and are content_diff (not count_diff).
+    by_segment = {row.split(",")[1]: row for row in body_rows}
+    assert set(by_segment) == {"NM01", "TR01"}
+    assert "KEY000000001,NM01,content_diff,1,1" in body_rows
+    assert "KEY000000001,TR01,content_diff,1,1" in body_rows
+
+
 def test_default_timestamp_used_when_run_timestamp_omitted(tmp_path: Path) -> None:
     """When run_timestamp is not supplied, pipeline.run uses now() and stamps files."""
     records = [_make_record("KEY000000001")]

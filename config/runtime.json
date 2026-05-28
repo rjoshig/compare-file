@@ -1,5 +1,5 @@
 {
-  "$comment": "Runtime behavior knobs. Phase 1 only honors hash_method, blake2b_digest_size, input_sorted, sort_temp_dir, chunk_size, key_type, and key_sort_order. parallel_workers and partition_strategy are reserved for Phase 2.",
+  "$comment": "Runtime behavior knobs. parallel_workers is the default worker count for the Phase 2 parallel pipeline; the CLI --workers flag overrides this value. partition_strategy currently supports only 'equal_count'. input_sorted=false is reserved for Phase 2's external-sort path.",
 
   "hash_method": "blake2b",
   "blake2b_digest_size": 16,
@@ -7,7 +7,7 @@
   "input_sorted": true,
   "sort_temp_dir": "/tmp/segment_compare",
 
-  "parallel_workers": 1,
+  "parallel_workers": 8,
   "chunk_size": 10000,
   "partition_strategy": "equal_count",
 

@@ -523,3 +523,60 @@ Implementation details:
 - Phase 4 service mode keeps its `{run_id}` archiving (different
   layer); the timestamped filenames are independent of the
   archive-directory scheme.
+
+---
+
+## ADR-028 — Worker count is configurable; default 8 in config; CLI overrides
+
+**Status:** accepted
+
+**Context:** Phase 2 introduces a `--workers N` CLI flag that selects
+between the Phase 1 single-process path (N=1) and the parallel
+pipeline (N>1). The initial implementation hard-coded the CLI default
+to 1 so the new path was opt-in. Once correctness was verified, the
+question became: what should "default behavior" mean for the engine
+across CLI, FastAPI (Phase 3), and the scheduled-service runner
+(Phase 4)? Production targets (3M records, big-org servers with
+16+ cores) want parallelism by default; local laptop runs want
+parallelism too (no penalty even on small inputs — see the bench
+note below). One config knob, several entry points.
+
+**Decision:** `runtime.json::parallel_workers` is the single source of
+truth for the default worker count across **all** entry points. The
+CLI `--workers N` flag, when supplied, overrides the config; when
+omitted, the CLI reads `config.runtime.parallel_workers`. Phase 3 and
+Phase 4 runners will adopt the same precedence (config default; per-
+request / per-config-file overrides where applicable).
+
+Stock-config default: **`parallel_workers: 8`**. Justification:
+
+- Production target is big-org servers with ≥ 8 cores; 8 workers
+  fully utilizes those.
+- Local benchmarks show no measurable penalty for 8 workers on
+  small fixtures (the 21-record realistic fixture runs in ~70 ms
+  end-to-end via the parallel path on a laptop, including subprocess
+  spawn). ProcessPoolExecutor's lazy task dispatch avoids worst-case
+  spawn cost when chunks are tiny.
+- 8 is a "production-shaped" number — not 1, not 16. Anything
+  smaller fails to use modern hardware; anything bigger
+  over-subscribes laptops.
+
+CLI surface:
+
+- `--workers N` overrides config for that invocation.
+- Omitted: uses `runtime.json::parallel_workers`.
+- Validation: `< 1` is rejected at the CLI boundary with exit code
+  10 (config error).
+
+**Consequences:**
+
+- "Default behavior" is now parallel. Phase 1 unit tests that want
+  the single-process code path explicitly pass `--workers 1`
+  (deterministic + fast).
+- Tuning the worker count is a config edit, not a code change —
+  important for the Phase 4 service runner where each scheduled job
+  is described by a JSON config.
+- The configurable-default knob and the runtime `partition_strategy`
+  field together future-proof the parallel pipeline: as new
+  partitioning strategies land (e.g., size-balanced for skewed
+  records), they slot in via config without CLI changes.

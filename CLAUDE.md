@@ -79,6 +79,10 @@ Before starting work on phase N, read `docs/phase-N.md` end to end.
 - Pure functions where possible — easier to test, easier to parallelize.
 - CLI via `argparse`. Every option has help text.
 - JSON for configs. Validate at load time, fail loudly on bad config.
+- **Parallelism is configurable.** `runtime.json::parallel_workers`
+  is the source of truth (default 8). The CLI `--workers N` flag
+  overrides per-invocation; Phase 3/4 runners read the same config
+  knob (ADR-028). Don't hardcode worker counts in code.
 
 ## Testing
 
