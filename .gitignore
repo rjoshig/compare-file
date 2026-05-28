@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+sdist/
+wheels/
+pip-wheel-metadata/
+.installed.cfg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Lint
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node / Vue (Phase 3)
+node_modules/
+dist/
+.vite/
+*.local
+.eslintcache
+
+# Run outputs — never commit comparison results
+results/
+runs/
+*.log
+
+# Service mode (Phase 4) — never commit live config flow directories
+pending/
+processing/
+archive/
+
+# Generated comparison outputs at repo root (allow examples/*.dat only)
+/*.dat
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

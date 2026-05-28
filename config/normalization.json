@@ -1,0 +1,19 @@
+{
+  "$comment": "Per-segment normalization rules. Each entry: file_a_strip and file_b_strip remove byte ranges before alignment; exclude_positions removes byte ranges from both files before hashing. Ranges are [start, end) Python-style. Phase 1 uses these position-based rules; Phase 2 adds field-based rules in addition.",
+
+  "TU4R": {
+    "file_a_strip": [],
+    "file_b_strip": [],
+    "exclude_positions": []
+  },
+  "NM01": {
+    "file_a_strip": [],
+    "file_b_strip": [],
+    "exclude_positions": []
+  },
+  "AD01": {
+    "file_a_strip": [],
+    "file_b_strip": [],
+    "exclude_positions": []
+  }
+}

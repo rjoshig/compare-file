@@ -1,0 +1,407 @@
+# Architectural Decision Records
+
+Each entry follows: **Title**, **Status**, **Context**, **Decision**,
+**Consequences**. Decisions are append-only — supersede an old one by
+adding a new entry that references it, never by editing in place.
+
+---
+
+## ADR-001 — Hash-based multiset comparison over pairwise O(n²)
+
+**Status:** accepted
+
+**Context:** Records contain repeating segments (e.g., 3 `TR01`s) that may
+appear in different order in File A vs File B. Naively comparing every A
+segment to every B segment is O(n²) per record and gets ugly with
+duplicates.
+
+**Decision:** For each segment type within a record, hash every
+normalized segment instance and compare `collections.Counter` of hashes
+between A and B. Equal Counters → match.
+
+**Consequences:** O(n) per record. Handles duplicates and ordering
+automatically. Requires a hash function (see ADR-002). Cannot tell which
+specific instance differs when counts differ — only that the multisets
+disagree (acceptable for the use case).
+
+---
+
+## ADR-002 — `hashlib.blake2b` default with built-in `hash()` switchable
+
+**Status:** accepted
+
+**Context:** We need a hash function for multiset comparison. blake2b is
+cryptographically strong and 128-bit digests have negligible collision
+risk at our scale. Python's built-in `hash()` is faster but only stable
+within a process (PYTHONHASHSEED is randomized) and 64-bit (small
+collision risk on 3M records).
+
+**Decision:** Default to `blake2b(digest_size=16)`. Allow switching to
+built-in `hash()` via `runtime.json::hash_method = "builtin"` for
+single-process runs where speed matters more than cross-process
+stability.
+
+**Consequences:** Production-safe by default; opt-in speedup available.
+Hashes are never persisted across runs, so built-in `hash()`'s
+process-locality isn't a problem when used.
+
+---
+
+## ADR-003 — Cardinality inferred from data, not declared in config
+
+**Status:** accepted
+
+**Context:** Some segment types repeat per record; counts vary. We
+could declare expected cardinality in config, but it's an ongoing
+maintenance burden.
+
+**Decision:** Don't declare cardinality. The Counter-based comparison
+naturally handles "A has 3, B has 2".
+
+**Consequences:** Adding a new segment is a config one-liner. Genuine
+count discrepancies surface as ordinary mismatches.
+
+---
+
+## ADR-004 — Segment size read from data, not config
+
+**Status:** accepted
+
+**Context:** Each segment carries its own size in the header. We could
+also declare expected sizes in config to catch corruption.
+
+**Decision:** Read size from the header only. Config lists segment
+names but no fixed sizes.
+
+**Consequences:** Variable-length data per segment instance works
+naturally. Corruption is detected by `ENDS` placement and stream
+overrun, not by size cross-check.
+
+---
+
+## ADR-005 — `ENDS` as explicit record terminator
+
+**Status:** accepted
+
+**Context:** Records need a boundary. Options: a length prefix, a known
+terminator segment, or a record delimiter only.
+
+**Decision:** Every record ends with an `ENDS` segment, followed by a
+configurable record delimiter (default `\n`).
+
+**Consequences:** Unambiguous parsing. Missing `ENDS` is a clear
+corruption signal. Slightly more verbose on the wire than length prefix.
+
+---
+
+## ADR-006 — Equal-count key partitioning over alphabetical range
+
+**Status:** accepted (Phase 2)
+
+**Context:** Parallel workers need a partition scheme. Alphabetical range
+partitioning (e.g., A–F, G–M, …) skews badly when keys are like
+`CUST00000001`…`CUST09999999` (all in the C range).
+
+**Decision:** Sort the inner-join key list and split into N equal-count
+chunks.
+
+**Consequences:** Even worker load regardless of key distribution.
+Requires a sorted key list, which we already need for the inner-join.
+
+---
+
+## ADR-007 — Position-based normalization in Phase 1, field-based in Phase 2
+
+**Status:** accepted
+
+**Context:** Real-world layout differences are easier to express as named
+fields, but a position-based config gets us comparing data sooner.
+
+**Decision:** Phase 1 ships position-based (`file_a_strip` /
+`file_b_strip` / `exclude_positions`). Phase 2 adds field-based
+(`file_a_layout` / `file_b_layout`) alongside. Both reduce to the same
+downstream pipeline (a list of byte ranges to remove).
+
+**Consequences:** Phase 1 keeps the surface area small. Phase 2 evolves
+without breaking existing configs.
+
+---
+
+## ADR-008 — Per-segment normalization rules separate for File A and File B
+
+**Status:** accepted
+
+**Context:** A and B may come from different systems with different
+layouts for the "same" segment.
+
+**Decision:** Each segment's rule has a `file_a_*` and `file_b_*`
+section. Strip rules can differ; the post-strip layout must align for
+comparison to be meaningful.
+
+**Consequences:** Cross-system reconciliation is supported by
+configuration alone, no per-comparison code.
+
+---
+
+## ADR-009 — Exclude removes bytes rather than masks them
+
+**Status:** accepted
+
+**Context:** Timestamps and other always-different fields need to be
+ignored. We could mask them (replace with `\x00`) or remove them.
+
+**Decision:** Remove them. The hash sees a shorter byte string.
+
+**Consequences:** Slightly cleaner semantics. Two segments are
+"equivalent up to excluded bytes" iff their post-exclude bytes match
+exactly.
+
+---
+
+## ADR-010 — Single copy in matches.dat, side-by-side in mismatches.dat
+
+**Status:** accepted
+
+**Context:** Matched records are equivalent after normalization, so
+emitting both copies is waste. Mismatched records need both sides for
+diagnosis.
+
+**Decision:** `matches.dat` gets File A's bytes only. `mismatches.dat`
+gets a side-by-side block with `=== KEY: ... ===` headers and `--- FILE
+A ---` / `--- FILE B ---` separators.
+
+**Consequences:** Smaller output for the common case. Mismatch output
+is diagnostic-grade.
+
+---
+
+## ADR-011 — JSON config over YAML
+
+**Status:** accepted
+
+**Context:** Need a config format.
+
+**Decision:** JSON. Stdlib parser, universal tooling, no indentation
+pitfalls.
+
+**Consequences:** Slightly more verbose than YAML. No comments — we
+work around this with a `"$comment"` key convention that JSON parsers
+ignore.
+
+---
+
+## ADR-012 — Engine as a library with multiple entry points
+
+**Status:** accepted
+
+**Context:** We need a CLI now (Phase 1), a web UI later (Phase 3), and
+a service runner (Phase 4). Reimplementing comparison logic in each is
+a maintenance nightmare.
+
+**Decision:** All comparison logic lives in `pipeline.run` and the
+modules it calls. CLI, FastAPI app, and service runner are thin wrappers
+that handle their own I/O and call `pipeline.run`.
+
+**Consequences:** One bug fix, three users of it. Clear test boundary
+(test `pipeline.run` once; test wrappers for their own concerns).
+
+---
+
+## ADR-013 — Files assumed sorted by key by default
+
+**Status:** accepted
+
+**Context:** Inner-join requires either a sort or a hash-join. Production
+extracts are typically already sorted; assuming that lets us stream both
+files in parallel.
+
+**Decision:** Default `input_sorted = true`. Phase 2 adds an optional
+external-sort step for the false case.
+
+**Consequences:** Fast path for the common case. Unsorted input is
+handled but slower.
+
+---
+
+## ADR-014 — Vue.js 3 + Vite + FastAPI for Phase 3
+
+**Status:** accepted
+
+**Context:** Need a UI stack for Phase 3.
+
+**Decision:** Vue.js 3 with Composition API, Vite as build tool,
+FastAPI backend. No heavy state management framework (`store/index.js`
+can be a hand-rolled reactive store if Pinia turns out to be overkill).
+
+**Consequences:** Modern stack, low ceremony, plenty of community
+material. No vendor lock-in beyond Vue itself.
+
+---
+
+## ADR-015 — Nested segments out of scope
+
+**Status:** accepted
+
+**Context:** Some fixed-format systems have segments that contain
+sub-segments. Supporting this complicates the parser substantially.
+
+**Decision:** Out of scope for all four phases in this plan. The parser
+model stays flat: a record is a sequence of segments.
+
+**Consequences:** If real-world data shows up nested, we revisit with
+a new ADR and a phase plan extension.
+
+---
+
+## ADR-016 — Pluggable parser knobs in config from day one
+
+**Status:** accepted
+
+**Context:** The user anticipates "minor changes in data segments and
+how to interpret" once real data arrives. Possible variants:
+non-4-byte segment names, binary size fields (vs ASCII), non-ASCII
+encodings, sizes excluding header, alternative record delimiters.
+
+**Decision:** `config/segments.json::parser` carries:
+`segment_name_bytes`, `size_field_bytes`, `size_encoding`,
+`size_includes_header`, `data_encoding`. Phase 1 only honors the
+defaults (4, 3, `ascii_int`, `true`, `ascii`) but the schema is in
+place, so adding support for variants is a parser change, not a config
+schema migration.
+
+**Consequences:** Forward-compatible config. Phase 1 doesn't fully
+implement the knobs but won't choke on them.
+
+---
+
+## ADR-017 — Run reproducibility via config hash in summary.json
+
+**Status:** accepted
+
+**Context:** Output bundles need to be self-describing for audit.
+
+**Decision:** `config.py` computes a SHA-256 over the canonical
+(sorted-key) JSON of the merged config bundle. `summary.json` records
+the hash plus the source config paths.
+
+**Consequences:** Cheap, unambiguous reproducibility check. Differing
+outputs from "the same config" are immediately diagnosable.
+
+---
+
+## ADR-018 — Streaming + key→offset index design from Phase 1
+
+**Status:** accepted
+
+**Context:** Phase 1 is small enough to load both files in memory, but
+Phase 2 isn't. If Phase 1 picks the in-memory shortcut, Phase 2 has to
+rewrite.
+
+**Decision:** Even in Phase 1, `pipeline.py` does an index-build pass
+(`dict[key, (offset, length)]`) and then seeks into the file for each
+joined record. Single process, but the architecture is what Phase 2
+needs.
+
+**Consequences:** Slightly more code in Phase 1, no rewrite in Phase 2.
+
+---
+
+## ADR-019 — Duplicate keys segregated to dedicated dup files per source
+
+**Status:** accepted
+
+**Context:** Production extracts are usually deduplicated upstream, but
+data quality issues happen. Comparing a duplicated record is ambiguous;
+silently joining-with-first is worse than visible failure.
+
+**Decision:** During the index-build pass, if a key appears more than
+once in File A, **all** occurrences with that key are routed to
+`dups_A.dat` (not the engine's join set). Same for File B with
+`dups_B.dat`. `summary.json` counts duplicate keys per file.
+
+**Consequences:** Eight output files instead of six. Duplicates surface
+loudly. The keys involved never reach `matches.dat` / `mismatches.dat`
+/ `keymismatch_*.dat`.
+
+---
+
+## ADR-020 — Python 3.10+, pytest, black + flake8, mypy strict
+
+**Status:** accepted
+
+**Context:** Need to lock toolchain to avoid bikeshedding.
+
+**Decision:** Python 3.10+ (modern type-hint syntax: `list[str]`,
+`X | None`). pytest for tests. black for formatting. flake8 for
+linting. mypy with `strict = true` for type checking.
+
+**Consequences:** All four tools must pass clean on every commit. No
+ruff (chose flake8 + black per user preference).
+
+---
+
+## ADR-021 — Phase 1 file encoding fixed to ASCII
+
+**Status:** accepted
+
+**Context:** Real-world fixed-format files come in many encodings
+(ASCII, Latin-1, UTF-8, EBCDIC). Supporting all of them in Phase 1 adds
+complexity without proving the comparison engine.
+
+**Decision:** Phase 1 assumes ASCII. The `data_encoding` config knob
+exists per ADR-016 but only `ascii` is honored. Phase 2 (or whenever
+real data demands it) expands the supported set.
+
+**Consequences:** Phase 1 ships sooner. Real-world non-ASCII data
+requires a Phase 2 parser change before it can be processed.
+
+---
+
+## ADR-022 — Hand-crafted sample files committed in `examples/`
+
+**Status:** accepted
+
+**Context:** A tiny representative sample lets the parser have a
+real-data target from day one, and serves as living documentation of
+the file format.
+
+**Decision:** Commit `examples/sample_a.dat` and `examples/sample_b.dat`
+(four records each, hand-crafted to cover match / mismatch / orphan
+scenarios). Expected output counts documented in `examples/README.md`.
+
+**Consequences:** Smoke-testable parser on commit 1. Future format
+variants get sample fixtures in `examples/` too.
+
+---
+
+## ADR-023 — Eight output files instead of six
+
+**Status:** accepted, supersedes nothing (extends the original spec)
+
+**Context:** ADR-019 introduces dup files. The original spec listed six
+output files.
+
+**Decision:** The canonical output set is now eight:
+`matches.dat`, `mismatches.dat`, `keymismatch_A.dat`,
+`keymismatch_B.dat`, `dups_A.dat`, `dups_B.dat`, `report.csv`,
+`summary.json`.
+
+**Consequences:** Writer module owns eight file handles. UI / email
+templates reference eight files.
+
+---
+
+## ADR-024 — Comparator iterator interface
+
+**Status:** accepted
+
+**Context:** Phase 2 parallelism shouldn't require rewriting the
+comparator.
+
+**Decision:** `pipeline.run` consumes
+`Iterator[tuple[key, record_bytes_a, record_bytes_b]]`. Phase 1's
+single-process index walk is one producer; Phase 2's process pool is
+another. Downstream (normalize → hash → compare → write) is unchanged.
+
+**Consequences:** Phase 2 work is "swap the producer", not "rewrite the
+engine".
