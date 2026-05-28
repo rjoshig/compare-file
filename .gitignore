@@ -56,6 +56,7 @@ dist/
 
 # Run outputs — never commit comparison results
 results/
+results*/
 runs/
 *.log
 

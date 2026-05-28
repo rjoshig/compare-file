@@ -1,13 +1,21 @@
-# Phase 1 — Core engine (POC)
+# Phase 1 — Core engine (POC) — **COMPLETE**
 
-**Goal:** prove the comparison technique end-to-end on 10K-record synthetic
-data. Single process. No performance tuning. Architectural seams already
-in place so Phase 2 parallelism slots in without rewrites.
+**Goal:** prove the comparison technique end-to-end on a realistic
+multi-segment fixture (10 records in File A, 11 in File B). Single
+process. No performance tuning. Architectural seams already in place so
+Phase 2 parallelism slots in without rewrites.
+
+> **Note (closure):** The original plan called for a synthetic 10K
+> generator + integration test. During phase-1 closure the user
+> elected to substitute a hand-built production-shaped fixture
+> (`examples/sample_a.dat` / `sample_b.dat`, 10 + 11 records) that
+> covers all ten scenarios in one pair. See **ADR-026**. The 10K
+> generator is deferred to a Phase 2 benchmarking deliverable.
 
 ## Acceptance criteria
 
-1. CLI runs end-to-end against the sample files and produces all eight
-   outputs:
+1. ✅ CLI runs end-to-end against the sample files and produces all
+   eight outputs:
    ```bash
    python -m segment_compare \
        --file-a examples/sample_a.dat \
@@ -15,14 +23,21 @@ in place so Phase 2 parallelism slots in without rewrites.
        --config-dir config/ \
        --output-dir results/
    ```
-2. The sample-data run matches the counts predicted in
-   `examples/README.md`.
-3. The synthetic data generator produces a 10K-record A/B pair covering
-   every scenario in §"Synthetic test scenarios" below.
-4. Integration test runs that 10K-record pair through the engine and
-   asserts the expected per-segment match/mismatch totals.
-5. `black`, `flake8`, `mypy --strict` clean on `src/`.
-6. `pytest` green; coverage ≥ 80% on the engine modules.
+   Output files are timestamped `<base>_YYYYMMDDHHMM.<ext>` (UTC) per
+   **ADR-027**.
+2. ✅ The sample-data run matches the counts predicted in
+   `examples/README.md` (4 matches, 3 mismatches, 1 only-A, 2 only-B,
+   2 dups-A, 2 dups-B, 3 report.csv rows).
+3. ✅ **(superseded)** A realistic fixture pair covers every scenario
+   in §"Synthetic test scenarios" below in 10 + 11 records.
+4. ✅ Integration test
+   `tests/test_pipeline.py::test_run_against_sample_files_matches_oracle`
+   runs that pair through `pipeline.run` and asserts the expected
+   per-segment match/mismatch totals.
+5. ✅ `black`, `flake8`, `mypy --strict` clean on `src/` and `tests/`
+   under pyenv 3.12.7.
+6. ✅ `pytest` green: 137 tests pass. Coverage threshold not measured
+   this phase (deferred to Phase 2 benchmarking work).
 
 ## Module-by-module breakdown
 

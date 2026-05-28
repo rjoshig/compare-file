@@ -12,10 +12,11 @@
     "PR01",
     "SC01",
     "CH01",
+    "TR01",
     "ENDS"
   ],
   "key_segment": "TU4R",
-  "key_range": [0, 12],
+  "key_range": [4, 16],
   "end_segment": "ENDS",
   "record_delimiter": "\n",
 

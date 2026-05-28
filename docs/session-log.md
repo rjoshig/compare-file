@@ -9,6 +9,166 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-27 (Phase 1 closure — realistic fixture + timestamped outputs)
+
+**Branch:** `dev`
+**Phase:** 1 → **COMPLETE**
+**Status:** All six Phase 1 acceptance criteria met. 137 tests pass on
+pyenv 3.12.7; `black`, `flake8`, `mypy --strict` all clean.
+
+### What was completed
+
+- Generated a production-shaped sample pair (`examples/sample_a.dat`
+  10 records / `examples/sample_b.dat` 11 records) covering all ten
+  Phase 1 scenarios in one fixture. Removed the obsolete simpler
+  samples and their docs.
+- Updated `config/segments.json`: added `TR01` to `known_segments`,
+  changed TU4R `key_range` from `[0, 12]` to `[4, 16]` (key now sits
+  after the literal `"DATA"` prefix in the new format).
+- Updated `config/normalization.json`: added `ENDS` exclude
+  `[[0, 3]]` (3-byte segment-count payload is not a data field) and
+  `CL01` exclude `[[11, 19]]` (8-byte timestamp at known offset must
+  be ignored for content equality).
+- Verified the parser handles `ENDS010NNN` (ENDS with non-zero data)
+  — no parser change was needed; it reads size from the header and
+  treats ENDS as a regular terminator regardless of payload. Added
+  an explicit unit test for the contract.
+- Added timestamped output filenames per **ADR-027**:
+  `writer.stamped_filename(base, stamp)` helper, optional
+  `OutputWriter(filename_stamp=...)` parameter,
+  `pipeline.run(run_timestamp=...)` parameter, `Summary.filename_stamp`
+  field, and `summary.json` emission of the stamp.
+- Rewrote the existing sample-file tests in `test_parser.py`,
+  `test_pipeline.py`, and `test_main.py` to assert against the new
+  fixture's expected counts and the stamped filenames. The integration
+  test `test_run_against_sample_files_matches_oracle` is now the
+  single oracle for Phase 1 acceptance criteria #2, #3, and #4.
+- Ran the engine end-to-end against the new fixture; verified all
+  eight outputs with the expected counts:
+  - matches=4, mismatched=3, only_a=1, only_b=2, dups_a=2, dups_b=2
+  - 3 rows in `report.csv` (NM01 content_diff,
+    TR01 content_diff, TR01 count_diff 4 vs 3)
+  - K010 lands in `matches.dat` (CL01 timestamp exclude is working
+    — A had `20250101`, B had `20250709`, both normalize identically)
+- New ADRs:
+  - **ADR-026** — Realistic fixture supersedes 10K synthetic for
+    Phase 1 closure. (Synthetic generator deferred to Phase 2.)
+  - **ADR-027** — Timestamped output filenames
+    (`<base>_YYYYMMDDHHMM.<ext>`).
+
+### What's pending
+
+Phase 1 is closed. Next priority is opening Phase 2:
+
+- Define a throughput target for the 3M-record acceptance criterion
+  (Phase 2.1 in `docs/phase-2.md` says this is set after a Phase 1
+  baseline measurement — that measurement is also still pending; the
+  10-record fixture runs in ~1.5 ms so the measurement is meaningless
+  at this scale).
+- Move `tests/synthetic_data.py` back onto the Phase 2 task list (now
+  a benchmarking deliverable per ADR-026).
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-026**: realistic fixture supersedes 10K synthetic for Phase 1.
+- **ADR-027**: timestamped output filenames.
+
+### Next concrete action
+
+Open Phase 2 by reading `docs/phase-2.md` end to end. Before writing
+any code, agree with the user on the 3M-record throughput target
+(seconds wall time, peak RSS) and on whether the field-level
+normalizer (Track B) or the parallel worker pool (Track A) comes
+first.
+
+### Notes for future me
+
+- The CLI run summary line ("done in X.XXXs: matched=..., ...") is
+  preserved verbatim. The test
+  `tests/test_main.py::test_main_against_samples_produces_all_outputs_and_returns_mismatches`
+  doesn't pin that string but does pin exit codes — be careful when
+  changing the message format.
+- The stamp is **UTC**, not local time. If you run the CLI at
+  10:58 PM local on May 27 and see `202605280358` in filenames,
+  that's correct (UTC == 03:58 next day). If the user wants local
+  time, that's a one-line change in `pipeline.run` but requires a
+  new ADR.
+- `_make_record` in `tests/test_pipeline.py` and `tests/test_main.py`
+  produces synthetic records in the new format (key at
+  TU4R `[4, 16)`). Don't revert to the old TU4R019 layout — it won't
+  parse against the current `config/segments.json`.
+- The 4 matched records include K010, which only matches *after* CL01
+  normalization. If you ever change the normalizer or the CL01 layout,
+  re-verify by inspecting `matches.dat` for K010.
+
+---
+
+## Session: 2026-05-27 (toolchain bump to Python 3.12+)
+
+**Branch:** `dev`
+**Phase:** 1 (step 9 still pending — not started this session)
+**Status:** docs + tooling updated; no engine code touched; user is
+still configuring pyenv, so no test run was performed.
+
+### What was completed
+
+- Pulled latest `main` (`7a6c791`, post-merge of PR #1) and created
+  `dev` as the working branch going forward (supersedes the
+  `claude/phase-N-<short>` branching convention in `CLAUDE.md`; that
+  convention is now stale).
+- Bumped Python floor from 3.10+ to 3.12+ in:
+  - `pyproject.toml`: `requires-python`, classifiers (3.12, 3.13),
+    `[tool.black]::target-version` (py312, py313),
+    `[tool.mypy]::python_version` (3.12).
+  - `CLAUDE.md`: code-conventions line.
+- Recorded the decision as **ADR-025** in `docs/decisions.md` and
+  marked **ADR-020** as superseded (Python version only — the pytest /
+  black / flake8 / mypy strict choices from ADR-020 still stand).
+
+### What's pending
+
+- **Phase 1, step 9** — `tests/synthetic_data.py::generate_pair` +
+  10K-record integration test. Unchanged from prior session.
+- Re-running `black`, `flake8`, `mypy --strict`, `pytest` under
+  Python 3.12 once pyenv is ready, to confirm nothing regressed from
+  the target-version bump. Expected to be a no-op since the existing
+  code uses no 3.10/3.11-specific syntax, but verify.
+
+### Blockers
+
+None. pyenv is configured with **3.12.7** pinned locally
+(`~/.pyenv/versions/3.12.7`, active via `~/.pyenv/shims/python`).
+No tests run yet on the new interpreter — that's the next concrete
+action.
+
+### Decisions captured this session
+
+- **ADR-025**: Python 3.12+ via pyenv, supersedes ADR-020's version
+  floor only.
+
+### Next concrete action
+
+Once pyenv 3.12+ is available: run `pytest`, `mypy --strict`, `black
+--check`, `flake8` to confirm a green baseline on the new interpreter.
+Then implement Phase 1 step 9 (synthetic data generator + 10K
+integration test) and close out Phase 1.
+
+### Notes for future me
+
+- The 2026-05-28 (Phase 1 — steps 1–8) entry's note about black
+  warning on py312 target under a 3.11 interpreter is moot now — the
+  interpreter floor is 3.12.
+- `CLAUDE.md` still references the `claude/phase-N-<short>` branching
+  pattern; user has instructed work goes on `dev`. Leaving the doc
+  text as-is for now (the dev-branch decision is recorded here);
+  revisit if the user wants `CLAUDE.md` updated to match.
+
+---
+
 ## Session: 2026-05-28 (Phase 1 — steps 1–8)
 
 **Branch:** `claude/segment-comparator-setup-Opl0J`

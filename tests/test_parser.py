@@ -20,10 +20,22 @@ from segment_compare.parser import (
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 DEFAULT_PARSER = ParserConfig()
+
+# Synthetic parser tests below construct their own segments with key at data
+# offset [0, 12) for brevity. The committed sample files use the realistic
+# format where the key sits at TU4R data offset [4, 16) (after a literal
+# "DATA" prefix).
 DEFAULT_SEGMENTS = SegmentsConfig(
     key_segment="TU4R",
     end_segment="ENDS",
     key_range=(0, 12),
+    record_delimiter=b"\n",
+)
+
+REALISTIC_SEGMENTS = SegmentsConfig(
+    key_segment="TU4R",
+    end_segment="ENDS",
+    key_range=(4, 16),
     record_delimiter=b"\n",
 )
 
@@ -209,26 +221,45 @@ def test_iter_records_key_range_beyond_data_raises() -> None:
 
 def test_sample_a_parses_to_expected_records() -> None:
     with (EXAMPLES / "sample_a.dat").open("rb") as fh:
-        records = list(iter_records(fh, DEFAULT_PARSER, DEFAULT_SEGMENTS))
+        records = list(iter_records(fh, DEFAULT_PARSER, REALISTIC_SEGMENTS))
+    # File A: 10 records covering all 10 phase-1 scenarios (see examples/README.md).
+    # Note: KEY000000008 appears twice (dup-in-A scenario).
     assert [r.key for r in records] == [
         "KEY000000001",
         "KEY000000002",
         "KEY000000003",
         "KEY000000004",
+        "KEY000000005",
+        "KEY000000006",
+        "KEY000000008",
+        "KEY000000008",
+        "KEY000000010",
+        "KEY000000011",
     ]
     for rec in records:
-        assert [s.name for s in rec.segments] == ["TU4R", "NM01", "ENDS"]
-        assert rec.length == 44
+        # Every record has TU4R, SH01, NM01, ≥3×TR01, 2×SC01, CL01, ENDS.
+        names = [s.name for s in rec.segments]
+        assert names[0] == "TU4R"
+        assert names[-1] == "ENDS"
+        assert names.count("TR01") in (3, 4)
 
 
 def test_sample_b_parses_to_expected_records() -> None:
     with (EXAMPLES / "sample_b.dat").open("rb") as fh:
-        records = list(iter_records(fh, DEFAULT_PARSER, DEFAULT_SEGMENTS))
+        records = list(iter_records(fh, DEFAULT_PARSER, REALISTIC_SEGMENTS))
+    # File B: 11 records. Note: KEY000000009 appears twice (dup-in-B scenario).
     assert [r.key for r in records] == [
         "KEY000000001",
         "KEY000000002",
+        "KEY000000003",
         "KEY000000004",
         "KEY000000005",
+        "KEY000000007",
+        "KEY000000009",
+        "KEY000000009",
+        "KEY000000010",
+        "KEY000000011",
+        "KEY000000012",
     ]
 
 
@@ -237,9 +268,41 @@ def test_sample_record_raw_round_trips() -> None:
     with (EXAMPLES / "sample_a.dat").open("rb") as fh:
         raw_source = fh.read()
     with (EXAMPLES / "sample_a.dat").open("rb") as fh:
-        records = list(iter_records(fh, DEFAULT_PARSER, DEFAULT_SEGMENTS))
+        records = list(iter_records(fh, DEFAULT_PARSER, REALISTIC_SEGMENTS))
     for rec in records:
         assert raw_source[rec.offset : rec.offset + len(rec.raw)] == rec.raw
+
+
+def test_ends_with_non_zero_data_payload_is_parsed_correctly() -> None:
+    """Phase-1 parser verification: ENDS may carry data (segment count etc.).
+
+    The realistic samples use ``ENDS010NNN`` where ``NNN`` is the ASCII
+    segment count. The parser must read the declared 3 data bytes and
+    treat the segment as a terminator regardless of payload size.
+    """
+    raw = (
+        b"TU4R023DATAKEY000000001TRLR"  # 7 header + 16 data (DATA + 12-byte key)
+        b"NM01017NAME_ALICE"  # 7 header + 10 data
+        b"ENDS010ABC"  # 7 header + 3 data
+        b"\n"
+    )
+    # Adjust: TRLR is 4 bytes, but TU4R023 declares 23 bytes total = 7 header + 16 data.
+    # 4 (DATA) + 12 (key) = 16 data bytes; no room for TRLR. Rebuild minimally.
+    raw = (
+        b"TU4R023DATAKEY000000001"  # 7 header + 4 "DATA" + 12 key = 23 bytes total
+        b"NM01017NAME_ALICE"
+        b"ENDS010ABC"
+        b"\n"
+    )
+    records = list(iter_records(_stream(raw), DEFAULT_PARSER, REALISTIC_SEGMENTS))
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.key == "KEY000000001"
+    # The ENDS segment carries its payload through to the parsed record.
+    ends_seg = rec.segments[-1]
+    assert ends_seg.name == "ENDS"
+    assert ends_seg.size == 10
+    assert ends_seg.data == b"ABC"
 
 
 # ---------------------------------------------------------------------------

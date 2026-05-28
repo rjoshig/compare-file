@@ -48,12 +48,24 @@ Currently in **scaffolding / pre–Phase 1**. The engine has not been
 implemented yet. See `docs/phase-plan.md` for the roadmap and
 `docs/session-log.md` for the latest state.
 
-## Setup (when Phase 1 code lands)
+## Setup
+
+Requires **Python 3.12+**. The project standardizes on **pyenv** with
+`3.12.7` pinned locally:
 
 ```bash
+pyenv install 3.12.7      # one-time, if not already installed
+pyenv local 3.12.7        # writes .python-version
+
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+```
+
+Verify the interpreter once activated:
+
+```bash
+python --version          # Python 3.12.7
 ```
 
 ## CLI usage (target, when Phase 1 code lands)

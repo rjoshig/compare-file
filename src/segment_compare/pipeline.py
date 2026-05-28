@@ -37,7 +37,7 @@ from segment_compare.config import ResolvedConfig
 from segment_compare.hasher import build_hasher
 from segment_compare.normalizer import PositionNormalizer
 from segment_compare.parser import Record, iter_records
-from segment_compare.writer import OutputWriter, SegmentSummary, Summary
+from segment_compare.writer import STAMP_FORMAT, OutputWriter, SegmentSummary, Summary
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ def run(
     file_b: Path,
     config: ResolvedConfig,
     output_dir: Path,
+    run_timestamp: datetime | None = None,
 ) -> Summary:
     """Execute one end-to-end comparison and return its :class:`Summary`.
 
@@ -97,10 +98,16 @@ def run(
             :func:`segment_compare.config.load_config`.
         output_dir: Directory to write the eight outputs into. Created
             if absent.
+        run_timestamp: Optional UTC timestamp to use as the run's
+            identity. Defaults to the moment :func:`run` is called.
+            Used both to suffix every output filename (so successive
+            runs don't clobber each other) and as the ``start_time``
+            field in ``summary.json``. Tests pass a fixed value for
+            deterministic output names.
 
     Returns:
         The :class:`Summary` that was just written to
-        ``output_dir / "summary.json"``.
+        ``output_dir / summary_<stamp>.json``.
 
     Raises:
         InputFileError: If either input file does not exist.
@@ -110,8 +117,9 @@ def run(
         if not path.exists():
             raise InputFileError(f"input file does not exist: {path}")
 
-    start_time = datetime.now(timezone.utc)
-    logger.info("starting comparison: %s vs %s", file_a, file_b)
+    start_time = run_timestamp or datetime.now(timezone.utc)
+    filename_stamp = start_time.strftime(STAMP_FORMAT)
+    logger.info("starting comparison: %s vs %s (stamp=%s)", file_a, file_b, filename_stamp)
 
     index_a, dups_a, total_a, segments_a = _index_file(file_a, config)
     index_b, dups_b, total_b, segments_b = _index_file(file_b, config)
@@ -137,7 +145,7 @@ def run(
     per_segment_match: dict[str, int] = defaultdict(int)
     per_segment_mismatch: dict[str, int] = defaultdict(int)
 
-    with OutputWriter(output_dir, config.segments) as writer:
+    with OutputWriter(output_dir, config.segments, filename_stamp=filename_stamp) as writer:
         _write_dups(file_a, dups_a, config, writer.write_dup_a)
         _write_dups(file_b, dups_b, config, writer.write_dup_b)
 
@@ -196,6 +204,7 @@ def run(
             config_paths={k: str(v) for k, v in config.paths.items()},
             config_audit_hash=config.audit_hash,
             engine_version=__version__,
+            filename_stamp=filename_stamp,
         )
         writer.finalize(summary)
 

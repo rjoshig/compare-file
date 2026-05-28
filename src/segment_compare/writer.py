@@ -41,6 +41,29 @@ SUMMARY_FILE = "summary.json"
 
 REPORT_HEADER = ("key", "segment_name", "status", "a_count", "b_count")
 
+STAMP_FORMAT = "%Y%m%d%H%M"
+
+
+def stamped_filename(base: str, stamp: str) -> str:
+    """Inject a timestamp into a base output filename.
+
+    Args:
+        base: The base filename (e.g., ``"matches.dat"``).
+        stamp: The stamp to inject (e.g., ``"202605272239"``). Empty
+            string leaves the filename unchanged.
+
+    Returns:
+        ``base`` if ``stamp`` is empty; otherwise ``<stem>_<stamp>.<ext>``.
+        Filenames with no extension get the stamp appended after an
+        underscore.
+    """
+    if not stamp:
+        return base
+    stem, dot, ext = base.rpartition(".")
+    if not dot:
+        return f"{base}_{stamp}"
+    return f"{stem}_{stamp}.{ext}"
+
 
 @dataclass(frozen=True, slots=True)
 class SegmentSummary:
@@ -92,6 +115,7 @@ class Summary:
     config_paths: dict[str, str] = field(default_factory=dict)
     config_audit_hash: str = ""
     engine_version: str = ""
+    filename_stamp: str = ""
 
 
 class OutputWriter:
@@ -103,9 +127,21 @@ class OutputWriter:
     closes all handles on exit even if :meth:`finalize` was not called.
     """
 
-    __slots__ = ("_output_dir", "_delimiter", "_handles", "_report_writer", "_closed")
+    __slots__ = (
+        "_output_dir",
+        "_delimiter",
+        "_handles",
+        "_report_writer",
+        "_closed",
+        "_filename_stamp",
+    )
 
-    def __init__(self, output_dir: Path, segments_cfg: SegmentsConfig) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        segments_cfg: SegmentsConfig,
+        filename_stamp: str = "",
+    ) -> None:
         """Initialize and open all eight output files for writing.
 
         Args:
@@ -114,9 +150,14 @@ class OutputWriter:
             segments_cfg: Used to learn the record delimiter (the same
                 delimiter used in the source files is appended after
                 every record written to ``*.dat``).
+            filename_stamp: Optional ``YYYYMMDDHHMM`` (or any) suffix
+                injected into every output filename so concurrent or
+                successive runs don't clobber each other. Empty string
+                (the default) uses the bare filenames.
         """
         self._output_dir = output_dir
         self._delimiter = segments_cfg.record_delimiter
+        self._filename_stamp = filename_stamp
         self._handles: dict[str, IO[bytes]] = {}
         # csv.writer is a factory function, not a class; the returned object
         # has no public type. Annotate as Any.
@@ -133,14 +174,26 @@ class OutputWriter:
             DUPS_A_FILE,
             DUPS_B_FILE,
         ):
-            self._handles[name] = (output_dir / name).open("wb")
+            self._handles[name] = (output_dir / self._on_disk(name)).open("wb")
 
         # csv.writer needs text mode; keep it separate from the binary handles.
-        report_path = output_dir / REPORT_FILE
+        report_path = output_dir / self._on_disk(REPORT_FILE)
         report_handle = report_path.open("w", encoding="utf-8", newline="")
         self._handles[REPORT_FILE] = report_handle  # type: ignore[assignment]
         self._report_writer = csv.writer(report_handle)
         self._report_writer.writerow(REPORT_HEADER)
+
+    def _on_disk(self, base: str) -> str:
+        """Resolve a base filename to its on-disk name, honoring the stamp."""
+        return stamped_filename(base, self._filename_stamp)
+
+    def path_for(self, base: str) -> Path:
+        """Return the resolved on-disk :class:`Path` for one output file.
+
+        Useful for tests and callers that need to read the file after the
+        writer is closed without recomputing the stamp.
+        """
+        return self._output_dir / self._on_disk(base)
 
     # ------------------------------------------------------------------
     # Context manager
@@ -231,7 +284,7 @@ class OutputWriter:
 
     def finalize(self, summary: Summary) -> None:
         """Write ``summary.json`` and close all handles."""
-        summary_path = self._output_dir / SUMMARY_FILE
+        summary_path = self._output_dir / self._on_disk(SUMMARY_FILE)
         with summary_path.open("w", encoding="utf-8") as fh:
             json.dump(_summary_to_json(summary), fh, indent=2, sort_keys=True)
             fh.write("\n")

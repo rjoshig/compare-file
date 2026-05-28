@@ -6,6 +6,11 @@
     "file_b_strip": [],
     "exclude_positions": []
   },
+  "SH01": {
+    "file_a_strip": [],
+    "file_b_strip": [],
+    "exclude_positions": []
+  },
   "NM01": {
     "file_a_strip": [],
     "file_b_strip": [],
@@ -15,5 +20,27 @@
     "file_a_strip": [],
     "file_b_strip": [],
     "exclude_positions": []
+  },
+  "TR01": {
+    "file_a_strip": [],
+    "file_b_strip": [],
+    "exclude_positions": []
+  },
+  "SC01": {
+    "file_a_strip": [],
+    "file_b_strip": [],
+    "exclude_positions": []
+  },
+  "CL01": {
+    "$comment": "CL01 layout: PUBL  ABC. (11) + timestamp YYYYMMDD (8) + ' I' (2) + 39 spaces. Exclude the timestamp so two records that differ only by date still compare as matches.",
+    "file_a_strip": [],
+    "file_b_strip": [],
+    "exclude_positions": [[11, 19]]
+  },
+  "ENDS": {
+    "$comment": "ENDS carries a 3-byte ASCII segment count after the header. The count is reconstructible from the record and is not a data field, so exclude it from comparison.",
+    "file_a_strip": [],
+    "file_b_strip": [],
+    "exclude_positions": [[0, 3]]
   }
 }

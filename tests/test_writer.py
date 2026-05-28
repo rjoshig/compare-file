@@ -21,6 +21,7 @@ from segment_compare.writer import (
     OutputWriter,
     SegmentSummary,
     Summary,
+    stamped_filename,
 )
 
 SEGMENTS_CFG = SegmentsConfig(
@@ -249,3 +250,66 @@ def test_summary_json_is_pretty_printed(tmp_path: Path) -> None:
     assert "\n" in text
     assert '"config_audit_hash"' in text
     assert text.endswith("\n")
+
+
+# ---------------------------------------------------------------------------
+# Timestamped filename support
+# ---------------------------------------------------------------------------
+
+
+def test_stamped_filename_helper_handles_extensions() -> None:
+    assert stamped_filename("matches.dat", "202605272239") == "matches_202605272239.dat"
+    assert stamped_filename("report.csv", "202605272239") == "report_202605272239.csv"
+    assert stamped_filename("summary.json", "202605272239") == "summary_202605272239.json"
+
+
+def test_stamped_filename_helper_empty_stamp_is_passthrough() -> None:
+    assert stamped_filename("matches.dat", "") == "matches.dat"
+
+
+def test_stamped_filename_helper_handles_no_extension() -> None:
+    assert stamped_filename("noext", "202605272239") == "noext_202605272239"
+
+
+def test_writer_with_stamp_writes_stamped_filenames(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    stamp = "202605272239"
+    with OutputWriter(out, SEGMENTS_CFG, filename_stamp=stamp) as w:
+        w.write_match(
+            Record(
+                key="K1",
+                segments=(Segment(name="TU4R", size=19, data=b"K1XXXXXXXXXX", offset=0),),
+                raw=b"AAAA",
+                offset=0,
+                length=5,
+            )
+        )
+        w.finalize(_summary(tmp_path))
+
+    # Bare names must NOT exist; stamped names must exist.
+    assert not (out / MATCHES_FILE).exists()
+    assert not (out / REPORT_FILE).exists()
+    assert not (out / SUMMARY_FILE).exists()
+
+    for base in (
+        MATCHES_FILE,
+        MISMATCHES_FILE,
+        KEYMISMATCH_A_FILE,
+        KEYMISMATCH_B_FILE,
+        DUPS_A_FILE,
+        DUPS_B_FILE,
+        REPORT_FILE,
+        SUMMARY_FILE,
+    ):
+        assert (out / stamped_filename(base, stamp)).exists()
+
+
+def test_writer_path_for_helps_callers_resolve_stamped_paths(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    stamp = "202605272239"
+    w = OutputWriter(out, SEGMENTS_CFG, filename_stamp=stamp)
+    try:
+        assert w.path_for(MATCHES_FILE) == out / "matches_202605272239.dat"
+        assert w.path_for(SUMMARY_FILE) == out / "summary_202605272239.json"
+    finally:
+        w.close()

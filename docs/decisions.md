@@ -327,7 +327,7 @@ loudly. The keys involved never reach `matches.dat` / `mismatches.dat`
 
 ## ADR-020 — Python 3.10+, pytest, black + flake8, mypy strict
 
-**Status:** accepted
+**Status:** superseded by ADR-025
 
 **Context:** Need to lock toolchain to avoid bikeshedding.
 
@@ -405,3 +405,121 @@ another. Downstream (normalize → hash → compare → write) is unchanged.
 
 **Consequences:** Phase 2 work is "swap the producer", not "rewrite the
 engine".
+
+---
+
+## ADR-025 — Python 3.12+ via pyenv (supersedes ADR-020 on Python version)
+
+**Status:** accepted, supersedes ADR-020 (Python version only; pytest /
+black / flake8 / mypy decisions from ADR-020 still stand)
+
+**Context:** ADR-020 set the floor at Python 3.10+. Development is now
+standardized on pyenv with Python 3.12 or newer. 3.12 brings
+performance improvements, better error messages, PEP 695 generics
+syntax, and aligns with the version the maintainer is running locally.
+3.10 and 3.11 support is dropped to avoid CI matrix bloat and to allow
+3.12+ syntax where it improves clarity.
+
+**Decision:** Python 3.12+ is the supported floor. `pyenv` is the
+expected version manager for local development; **3.12.7** is the
+pinned local version (see `.python-version`). Tooling updated:
+
+- `pyproject.toml::requires-python` → `>=3.12`
+- `pyproject.toml::classifiers` → 3.12, 3.13
+- `[tool.black]::target-version` → `["py312", "py313"]`
+- `[tool.mypy]::python_version` → `"3.12"`
+
+**Consequences:** Contributors must have Python 3.12+ on their path
+(pyenv recommended). 3.12-specific syntax is fair game. Anyone still on
+3.10/3.11 needs to upgrade before contributing. The black warning noted
+in the 2026-05-28 session log (py312 target on a 3.11 interpreter) is
+moot now.
+
+---
+
+## ADR-026 — Realistic fixture supersedes 10K synthetic for Phase 1 closure
+
+**Status:** accepted, modifies Phase 1 plan in `docs/phase-1.md`
+
+**Context:** The original Phase 1 plan called for a 10K-record
+synthetic generator (`tests/synthetic_data.py::generate_pair`) plus a
+10K-record integration test as the closing deliverable. While planning
+phase-1 closure, the user supplied a production-shaped record layout
+and asked for a small, deliberate, hand-built fixture covering all ten
+scenarios instead. The fixture lives at
+`examples/sample_a.dat` (10 records) and `examples/sample_b.dat` (11
+records) and exercises every scenario in §"Synthetic test scenarios"
+in `docs/phase-1.md`.
+
+**Decision:** The realistic 10/11-record fixture replaces the planned
+10K synthetic generator for Phase 1 acceptance criteria #3 and #4.
+The single integration test
+`tests/test_pipeline.py::test_run_against_sample_files_matches_oracle`
+now satisfies both criteria. The synthetic generator becomes a Phase 2
+benchmarking deliverable (`tests/synthetic_data.py` will land alongside
+the 3M-record performance fixture).
+
+**Consequences:**
+
+- Phase 1 closes one commit sooner with a fixture the user has
+  reviewed and recognizes.
+- The realistic fixture is the canonical phase-1 oracle going forward;
+  the old simple `TU4R019 + NM01017 + ENDS007` samples are removed.
+- Synthetic record generation is still useful for ad-hoc scenario
+  tests; the helper `tests/test_pipeline.py::_make_record` produces
+  records compatible with the new config (key at TU4R data `[4, 16)`).
+- Phase 2 benchmarking inherits the production-shaped layout, so the
+  3M-record generator can reuse the same segment templates rather than
+  reinventing them.
+
+---
+
+## ADR-027 — Timestamped output filenames (`<base>_YYYYMMDDHHMM.<ext>`)
+
+**Status:** accepted
+
+**Context:** Successive runs against the same output directory used to
+clobber each other — the writer always wrote `matches.dat`,
+`mismatches.dat`, etc. as bare names. In real operational use (Phase
+4 service mode, manual investigations, ad-hoc CLI runs), an operator
+wants to keep multiple runs side by side without manually rotating
+directories.
+
+**Decision:** Every output file produced by `pipeline.run` carries a
+12-character UTC timestamp (`YYYYMMDDHHMM`) suffixed before the
+extension. Examples: `matches_202605280358.dat`,
+`report_202605280358.csv`, `summary_202605280358.json`. All eight
+outputs from a single run share the stamp so they group naturally on
+disk.
+
+Implementation details:
+
+- The stamp is computed once at the start of `pipeline.run`
+  (`start_time.strftime("%Y%m%d%H%M")` in UTC) and threaded through to
+  `OutputWriter(filename_stamp=...)`.
+- The stamp is also stored on `Summary.filename_stamp` and emitted in
+  `summary.json` so external callers can locate the sibling files.
+- `pipeline.run` accepts an optional `run_timestamp: datetime` arg for
+  deterministic tests; the CLI never sets it.
+- `writer.stamped_filename(base, stamp)` is the single source of truth
+  for the on-disk naming convention; callers (including tests) use it
+  to resolve paths.
+- Bare filenames (`matches.dat`, etc.) are still the default when
+  `OutputWriter` is invoked without a stamp — preserves the
+  `tests/test_writer.py` unit tests, which don't care about stamping.
+
+**Consequences:**
+
+- Operators get versioned outputs for free; no run-isolation logic
+  needed in the wrapper.
+- Per-run output directories (e.g., one subdir per run) are no longer
+  required; flat output directories work fine and the stamp keeps
+  things sorted chronologically.
+- Minute-level granularity means two runs started in the same UTC
+  minute against the same output directory will clobber each other.
+  Acceptable for human-driven and scheduled-cadence use; if
+  sub-minute resolution is needed, the stamp format becomes a config
+  knob in a future ADR.
+- Phase 4 service mode keeps its `{run_id}` archiving (different
+  layer); the timestamped filenames are independent of the
+  archive-directory scheme.

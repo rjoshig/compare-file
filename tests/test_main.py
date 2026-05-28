@@ -23,6 +23,21 @@ SAMPLE_A = EXAMPLES / "sample_a.dat"
 SAMPLE_B = EXAMPLES / "sample_b.dat"
 
 
+def _make_record(key: str, name_data: bytes = b"NAME_XYZ__") -> bytes:
+    """Synthetic record matching the realistic config (key at TU4R [4,16))."""
+    assert len(key) == 12
+    assert len(name_data) == 10
+    return b"TU4R023DATA" + key.encode() + b"NM01017" + name_data + b"ENDS007"
+
+
+def _stamped_path(out_dir: Path, base: str) -> Path:
+    """Find the single timestamped output file in ``out_dir`` for ``base``."""
+    stem, _, ext = base.rpartition(".")
+    matches = sorted(out_dir.glob(f"{stem}_*.{ext}"))
+    assert len(matches) == 1, f"expected 1 file for {base}, found: {matches}"
+    return matches[0]
+
+
 def _common_args(output_dir: Path) -> list[str]:
     return [
         "--file-a",
@@ -43,10 +58,10 @@ def test_main_against_samples_produces_all_outputs_and_returns_mismatches(
     out = tmp_path / "results"
     code = main(_common_args(out))
 
-    # Sample has 1 mismatch → exit 1 (mismatch beats orphans/dups for exit code).
+    # Samples have mismatches → exit 1 (mismatch beats orphans/dups for exit code).
     assert code == EXIT_MISMATCHES
 
-    # All eight outputs exist
+    # All eight outputs exist with a timestamped suffix.
     for name in (
         "matches.dat",
         "mismatches.dat",
@@ -57,28 +72,38 @@ def test_main_against_samples_produces_all_outputs_and_returns_mismatches(
         "report.csv",
         "summary.json",
     ):
-        assert (out / name).exists(), f"missing output: {name}"
+        path = _stamped_path(out, name)
+        assert path.exists(), f"missing output: {name}"
+        # YYYYMMDDHHMM = 12 digits between stem and extension
+        stem = path.stem
+        stamp = stem.rsplit("_", 1)[-1]
+        assert len(stamp) == 12 and stamp.isdigit(), f"bad stamp in {path.name}"
 
-    summary = json.loads((out / "summary.json").read_text())
-    assert summary["records_matched"] == 2
-    assert summary["records_mismatched"] == 1
+    summary = json.loads(_stamped_path(out, "summary.json").read_text())
+    # Per examples/README.md
+    assert summary["records_matched"] == 4
+    assert summary["records_mismatched"] == 3
     assert summary["keys_in_a_only"] == 1
-    assert summary["keys_in_b_only"] == 1
+    assert summary["keys_in_b_only"] == 2
+    assert summary["dups_in_a"] == 2
+    assert summary["dups_in_b"] == 2
 
 
 def test_main_all_matches_returns_ok(tmp_path: Path) -> None:
-    """When A and B are byte-identical, exit code is 0."""
-    a_copy = tmp_path / "a.dat"
-    b_copy = tmp_path / "b.dat"
-    a_copy.write_bytes(SAMPLE_A.read_bytes())
-    b_copy.write_bytes(SAMPLE_A.read_bytes())  # identical to A
+    """When A and B are byte-identical (and have no dups), exit code is 0."""
+    a = tmp_path / "a.dat"
+    b = tmp_path / "b.dat"
+    # Fresh synthetic content (no dups, no orphans) → clean match.
+    payload = b"\n".join([_make_record("KEY000000001"), _make_record("KEY000000002")]) + b"\n"
+    a.write_bytes(payload)
+    b.write_bytes(payload)
     out = tmp_path / "results"
     code = main(
         [
             "--file-a",
-            str(a_copy),
+            str(a),
             "--file-b",
-            str(b_copy),
+            str(b),
             "--config-dir",
             str(CONFIG_DIR),
             "--output-dir",
@@ -92,9 +117,9 @@ def test_main_orphans_only_returns_warnings(tmp_path: Path) -> None:
     """No mismatches but orphan keys → exit code 2."""
     a_file = tmp_path / "a.dat"
     b_file = tmp_path / "b.dat"
-    # Both records are different keys → all orphans, zero joined records.
-    a_file.write_bytes(b"TU4R019KEY000000001NM01017NAME_ALICEENDS007\n")
-    b_file.write_bytes(b"TU4R019KEY000000999NM01017NAME_ZZZZZENDS007\n")
+    # Different keys → all orphans, zero joined records.
+    a_file.write_bytes(_make_record("KEY000000001") + b"\n")
+    b_file.write_bytes(_make_record("KEY000000999") + b"\n")
     out = tmp_path / "results"
     code = main(
         [

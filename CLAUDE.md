@@ -47,9 +47,29 @@ Before starting work on phase N, read `docs/phase-N.md` end to end.
   as the code change.
 - Phase docs (`docs/phase-N.md`) get checked off as tasks land.
 
+## Local environment
+
+- Python version is managed with **pyenv**. Pinned version: **3.12.7**
+  (set via `pyenv local 3.12.7` / `~/.python-version` resolves to
+  `~/.pyenv/versions/3.12.7`). The active interpreter is
+  `~/.pyenv/shims/python`.
+- Quick sanity checks before starting work:
+  ```bash
+  pyenv version          # should show 3.12.7 (set by ...)
+  which python           # should show ~/.pyenv/shims/python
+  python --version       # should show Python 3.12.7
+  ```
+- If `pyenv version` reports anything other than 3.12.7 in this
+  directory, fix that before running tests — version drift is a more
+  common source of mysterious test failures than actual bugs.
+- Virtualenv layout: `.venv/` at repo root (gitignored). Recreate with
+  `python -m venv .venv && source .venv/bin/activate && pip install -e
+  ".[dev]"` when needed.
+
 ## Code conventions
 
-- Python 3.10+, type hints on every function signature, Google-style
+- Python 3.12+ (pyenv 3.12.7 is the pinned local version), type hints
+  on every function signature, Google-style
   docstrings on every public function and class.
 - Use `pathlib.Path` for filesystem paths, never string concatenation.
 - Use `logging` module — never `print()`.
