@@ -75,6 +75,51 @@ class NormalizationRule:
 
 
 @dataclass(frozen=True, slots=True)
+class FieldDef:
+    """One field's definition within a segment's per-file layout.
+
+    Attributes:
+        name: Logical field name (e.g., ``"first_name"``). Used as the
+            key in the canonical ``name=value`` representation, so it
+            must match across File A and File B for fields the engine
+            should compare. ASCII only.
+        length: Length in bytes that this field occupies in the
+            segment's raw data area. Must be > 0.
+        exclude: If true, the field is dropped before hashing so its
+            content does not influence the match/mismatch verdict.
+            Useful for timestamps, filler bytes, or system-specific
+            metadata that differs across A and B but is not part of
+            the comparable data.
+    """
+
+    name: str
+    length: int
+    exclude: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FieldNormalizationRule:
+    """Per-segment field-based normalization rule (Phase 2 form).
+
+    The two layouts can differ in field order, field lengths, or even
+    field counts (one side may carry trailing filler that the other
+    does not). After excludes are applied and retained fields are
+    keyed by ``name``, the segments compare equal iff the retained
+    name-value sets agree (see :class:`FieldNormalizer`).
+
+    Attributes:
+        file_a_layout: Fields slicing File A's segment data, in
+            byte order. Sum of lengths must equal the segment's
+            on-wire data length at runtime; mismatch raises a
+            ``ValueError`` from the normalizer.
+        file_b_layout: Same for File B.
+    """
+
+    file_a_layout: tuple[FieldDef, ...]
+    file_b_layout: tuple[FieldDef, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeConfig:
     """Runtime knobs from ``runtime.json``.
 
@@ -116,6 +161,7 @@ class ResolvedConfig:
     segments: SegmentsConfig
     known_segments: tuple[str, ...]
     normalization: dict[str, NormalizationRule] = field(default_factory=dict)
+    field_normalization: dict[str, FieldNormalizationRule] = field(default_factory=dict)
     runtime: RuntimeConfig = field(
         default_factory=lambda: RuntimeConfig(
             hash_method="blake2b",
@@ -156,7 +202,7 @@ def load_config(config_dir: Path) -> ResolvedConfig:
 
     parser_cfg = _build_parser_config(seg_raw, seg_path)
     known_segments, segments_cfg = _build_segments_config(seg_raw, seg_path)
-    normalization = _build_normalization(norm_raw, known_segments, norm_path)
+    normalization, field_normalization = _build_normalization(norm_raw, known_segments, norm_path)
     runtime_cfg = _build_runtime_config(rt_raw, rt_path)
 
     audit_hash = _compute_audit_hash(seg_raw, norm_raw, rt_raw)
@@ -166,6 +212,7 @@ def load_config(config_dir: Path) -> ResolvedConfig:
         segments=segments_cfg,
         known_segments=known_segments,
         normalization=normalization,
+        field_normalization=field_normalization,
         runtime=runtime_cfg,
         audit_hash=audit_hash,
         paths={
@@ -340,12 +387,24 @@ def _build_segments_config(
     return known_segments, segments_cfg
 
 
+_POSITION_FORM_KEYS = frozenset({"file_a_strip", "file_b_strip", "exclude_positions"})
+_FIELD_FORM_KEYS = frozenset({"file_a_layout", "file_b_layout"})
+
+
 def _build_normalization(
     norm_raw: dict[str, Any],
     known_segments: tuple[str, ...],
     norm_path: Path,
-) -> dict[str, NormalizationRule]:
-    out: dict[str, NormalizationRule] = {}
+) -> tuple[dict[str, NormalizationRule], dict[str, FieldNormalizationRule]]:
+    """Dispatch each entry to position-based or field-based rule builder.
+
+    Returns two maps keyed by segment name. A segment appears in
+    exactly one of them — mixed-form entries (both position-form keys
+    and field-form keys in the same JSON object) are rejected at load
+    time per ADR-029.
+    """
+    position_rules: dict[str, NormalizationRule] = {}
+    field_rules: dict[str, FieldNormalizationRule] = {}
     known = set(known_segments)
     for name, rule_raw in norm_raw.items():
         if name.startswith("$"):
@@ -356,20 +415,100 @@ def _build_normalization(
                 "segment is not in segments.json::known_segments",
             )
         _require_type(rule_raw, dict, norm_path, name)
-        out[name] = NormalizationRule(
-            file_a_strip=_parse_ranges(
-                rule_raw.get("file_a_strip", []), norm_path, f"{name}.file_a_strip"
-            ),
-            file_b_strip=_parse_ranges(
-                rule_raw.get("file_b_strip", []), norm_path, f"{name}.file_b_strip"
-            ),
-            exclude_positions=_parse_ranges(
-                rule_raw.get("exclude_positions", []),
-                norm_path,
-                f"{name}.exclude_positions",
-            ),
+
+        keys = {k for k in rule_raw if not k.startswith("$")}
+        has_position = bool(keys & _POSITION_FORM_KEYS)
+        has_field = bool(keys & _FIELD_FORM_KEYS)
+        if has_position and has_field:
+            raise ConfigError(
+                f"{norm_path.name}::{name}",
+                "cannot mix position-based keys "
+                f"({sorted(keys & _POSITION_FORM_KEYS)}) and field-based keys "
+                f"({sorted(keys & _FIELD_FORM_KEYS)}) in the same entry",
+            )
+
+        if has_field:
+            field_rules[name] = _parse_field_rule(rule_raw, name, norm_path)
+        else:
+            position_rules[name] = NormalizationRule(
+                file_a_strip=_parse_ranges(
+                    rule_raw.get("file_a_strip", []), norm_path, f"{name}.file_a_strip"
+                ),
+                file_b_strip=_parse_ranges(
+                    rule_raw.get("file_b_strip", []), norm_path, f"{name}.file_b_strip"
+                ),
+                exclude_positions=_parse_ranges(
+                    rule_raw.get("exclude_positions", []),
+                    norm_path,
+                    f"{name}.exclude_positions",
+                ),
+            )
+    return position_rules, field_rules
+
+
+def _parse_field_rule(
+    rule_raw: dict[str, Any], segment_name: str, norm_path: Path
+) -> FieldNormalizationRule:
+    """Build a :class:`FieldNormalizationRule` from one JSON entry.
+
+    Both ``file_a_layout`` and ``file_b_layout`` must be present and
+    non-empty. Each layout is a list of objects ``{"name", "length",
+    "exclude"}``. Field names within a layout must be unique.
+    """
+    a_raw = _require_field(rule_raw, "file_a_layout", norm_path)
+    b_raw = _require_field(rule_raw, "file_b_layout", norm_path)
+    return FieldNormalizationRule(
+        file_a_layout=_parse_field_layout(a_raw, norm_path, f"{segment_name}.file_a_layout"),
+        file_b_layout=_parse_field_layout(b_raw, norm_path, f"{segment_name}.file_b_layout"),
+    )
+
+
+def _parse_field_layout(raw: Any, norm_path: Path, field_path: str) -> tuple[FieldDef, ...]:
+    """Validate one side of a field rule and return the parsed layout."""
+    if not isinstance(raw, list):
+        raise ConfigError(
+            f"{norm_path.name}::{field_path}",
+            f"must be a list of field objects, got {type(raw).__name__}",
         )
-    return out
+    if not raw:
+        raise ConfigError(
+            f"{norm_path.name}::{field_path}",
+            "must declare at least one field",
+        )
+    seen_names: set[str] = set()
+    out: list[FieldDef] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ConfigError(
+                f"{norm_path.name}::{field_path}[{i}]",
+                f"must be an object with name/length/exclude, got {type(item).__name__}",
+            )
+        name = item.get("name")
+        length = item.get("length")
+        exclude = item.get("exclude", False)
+        if not isinstance(name, str) or not name:
+            raise ConfigError(
+                f"{norm_path.name}::{field_path}[{i}].name",
+                "must be a non-empty string",
+            )
+        if not isinstance(length, int) or length <= 0:
+            raise ConfigError(
+                f"{norm_path.name}::{field_path}[{i}].length",
+                f"must be a positive int, got {length!r}",
+            )
+        if not isinstance(exclude, bool):
+            raise ConfigError(
+                f"{norm_path.name}::{field_path}[{i}].exclude",
+                f"must be true/false, got {type(exclude).__name__}",
+            )
+        if name in seen_names:
+            raise ConfigError(
+                f"{norm_path.name}::{field_path}[{i}].name",
+                f"duplicate field name {name!r} in this layout",
+            )
+        seen_names.add(name)
+        out.append(FieldDef(name=name, length=length, exclude=exclude))
+    return tuple(out)
 
 
 def _parse_ranges(raw: Any, path: Path, field_path: str) -> tuple[tuple[int, int], ...]:

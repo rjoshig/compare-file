@@ -37,7 +37,7 @@ from segment_compare.comparator import compare_records
 from segment_compare.config import ResolvedConfig
 from segment_compare.hasher import build_hasher
 from segment_compare.merger import fold_partial_summaries, merge_worker_outputs
-from segment_compare.normalizer import PositionNormalizer
+from segment_compare.normalizer import CompositeNormalizer
 from segment_compare.parser import Record, iter_records
 from segment_compare.partitioner import equal_count_partition
 from segment_compare.worker import WorkerPayload, WorkerResult, run_worker
@@ -149,7 +149,7 @@ def run(
     only_b_keys = sorted(keys_b - keys_a)
     both_keys = sorted(keys_a & keys_b)
 
-    normalizer = PositionNormalizer(config.normalization)
+    normalizer = CompositeNormalizer(config.normalization, config.field_normalization)
     hasher = build_hasher(config.runtime)
 
     records_matched = 0

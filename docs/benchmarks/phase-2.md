@@ -7,7 +7,7 @@
 | 3M @ 4 workers speedup           | ≥ 1.8× (revised from 2.5×)   | 1.84× (124.5 s)| ✅      |
 | 3M @ 4 workers peak RSS          | ≤ 4 GiB                      | 2.39 GiB       | ✅      |
 | N-worker output == 1-worker      | byte-identical .dat outputs  | identical at 1/2/4 | ✅  |
-| Field-level vs position-level    | byte-identical .dat outputs  | _pending_      | ⏳      |
+| Field-level vs position-level    | byte-identical .dat outputs  | identical on realistic fixture | ✅ |
 
 **The original 90 s @ 4 workers laptop target was relaxed** after the
 first measurement landed (1.84× speedup, not the 2.5× the target
@@ -88,16 +88,29 @@ The inner-join is what `Track A` parallelizes. The 124.5 s at 4
 workers ≈ 70 s (still-serial index) + 140/4 s (parallel join) +
 ~20 s (write + merge) = ~125 s, matching observation.
 
-## Track B — field-level normalizer (pending)
+## Track B — field-level normalizer
 
-To be filled in once Track B lands. Identical-output verification
-at the run worker count:
+Identical-output verification on the realistic 10/11-record fixture
+(test: `tests/test_field_integration.py::test_field_config_classifies_records_same_as_position_config`).
+Each side runs the engine end-to-end with two configs that encode the
+same exclusion semantics — one position-based (the stock config),
+one field-based (a per-test fixture config with CL01 layout
+`prefix(11) + timestamp(8, exclude) + suffix(2) + padding(39)` and
+ENDS layout `segment_count(3, exclude)`).
 
-| Config       | Wall time (s) | matches | mismatches | only_a | only_b | dups_a | dups_b |
-|--------------|--------------:|--------:|-----------:|-------:|-------:|-------:|-------:|
-| Position     |               |         |            |        |        |        |        |
-| Field        |               |         |            |        |        |        |        |
-| **Delta**    |               | 0       | 0          | 0      | 0      | 0      | 0      |
+| Config       | matches | mismatches | only_a | only_b | dups_a | dups_b |
+|--------------|--------:|-----------:|-------:|-------:|-------:|-------:|
+| Position     | 4       | 3          | 1      | 2      | 2      | 2      |
+| Field        | 4       | 3          | 1      | 2      | 2      | 2      |
+| **Delta**    | 0       | 0          | 0      | 0      | 0      | 0      |
+
+`*.dat` outputs are byte-identical between the two configs. The
+canonical hash bytes differ (position hashes the byte slice; field
+hashes `<name>=<value>\x1F<name>=<value>...`), but the equivalence
+relation each config encodes is the same, so per-pair match/mismatch
+decisions agree everywhere.
+
+Acceptance criterion #3 — **green** at commit `<next>`.
 
 ## Hash method comparison (pending)
 

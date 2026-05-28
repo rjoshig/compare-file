@@ -16,9 +16,15 @@ from __future__ import annotations
 
 from typing import Literal, Protocol
 
-from segment_compare.config import NormalizationRule
+from segment_compare.config import FieldNormalizationRule, NormalizationRule
 
 RecordSource = Literal["A", "B"]
+
+# ASCII Unit Separator. Used in the field-based canonical form between
+# successive ``name=value`` field encodings (ADR-029). Chosen because
+# fixed-format ASCII data never contains 0x1F in real records.
+FIELD_SEPARATOR = b"\x1f"
+FIELD_KV_DELIM = b"="
 
 
 class Normalizer(Protocol):
@@ -81,6 +87,127 @@ class PositionNormalizer:
 
         stripped = _remove_ranges(raw_data, strip_ranges)
         return _remove_ranges(stripped, rule.exclude_positions)
+
+
+class FieldNormalizer:
+    """Field-based normalizer (Phase 2).
+
+    Slices each segment's raw data per the per-source layout, drops
+    fields whose ``exclude`` flag is set, and emits a canonical
+    ``name=value`` byte string sorted by logical field name. The sort
+    makes the canonical form **order-independent** — File A and File B
+    can carry the same logical fields in different physical order and
+    still compare equal.
+
+    Layout coverage is strict: the sum of field lengths in the chosen
+    layout must equal the segment data length at runtime. A mismatch
+    (likely a config typo or schema drift) raises ``ValueError`` and
+    aborts the comparison.
+
+    Segments not present in the rules map pass through unchanged.
+    """
+
+    __slots__ = ("_rules",)
+
+    def __init__(self, rules: dict[str, FieldNormalizationRule]) -> None:
+        """Initialize with the per-segment field-rule mapping."""
+        self._rules = rules
+
+    def normalize(self, segment_name: str, raw_data: bytes, source: RecordSource) -> bytes:
+        """Return the canonical bytes for one segment instance.
+
+        Args:
+            segment_name: Name of the segment (e.g., ``"NM01"``).
+            raw_data: Segment data bytes (header excluded).
+            source: ``"A"`` or ``"B"`` to pick the per-file layout.
+
+        Returns:
+            Bytes of the form ``name1=value1\\x1Fname2=value2\\x1F...``
+            with field encodings sorted alphabetically by name and
+            excluded fields dropped. Empty bytes if every field is
+            excluded.
+
+        Raises:
+            ValueError: ``source`` is not ``"A"`` or ``"B"``, or the
+                chosen layout's total length doesn't match
+                ``len(raw_data)``.
+        """
+        rule = self._rules.get(segment_name)
+        if rule is None:
+            return raw_data
+
+        if source == "A":
+            layout = rule.file_a_layout
+        elif source == "B":
+            layout = rule.file_b_layout
+        else:
+            raise ValueError(f"source must be 'A' or 'B', got {source!r}")
+
+        expected = sum(f.length for f in layout)
+        if expected != len(raw_data):
+            raise ValueError(
+                f"FieldNormalizer: segment {segment_name!r} (source {source}) "
+                f"data length {len(raw_data)} does not match layout sum "
+                f"{expected} ({len(layout)} fields)"
+            )
+
+        parts: list[bytes] = []
+        pos = 0
+        for f in layout:
+            value = raw_data[pos : pos + f.length]
+            pos += f.length
+            if not f.exclude:
+                parts.append(f.name.encode("ascii") + FIELD_KV_DELIM + value)
+
+        # Sort by encoded bytes (≡ sort by ASCII name) so A and B with
+        # differing physical layouts but the same logical fields produce
+        # byte-identical canonical forms.
+        parts.sort()
+        return FIELD_SEPARATOR.join(parts)
+
+
+class CompositeNormalizer:
+    """Routes each segment to either :class:`PositionNormalizer` or :class:`FieldNormalizer`.
+
+    A single :class:`segment_compare.config.ResolvedConfig` can mix
+    both normalization forms; one segment uses position-based and
+    another field-based. The pipeline builds **one** normalizer object
+    that handles the dispatch internally so the comparator stays
+    agnostic.
+
+    Segments absent from both rule maps pass through unchanged.
+    """
+
+    __slots__ = ("_position", "_field", "_field_segments")
+
+    def __init__(
+        self,
+        position_rules: dict[str, NormalizationRule],
+        field_rules: dict[str, FieldNormalizationRule],
+    ) -> None:
+        """Initialize with the two per-segment rule maps.
+
+        Raises:
+            ValueError: A segment name appears in both maps. This is
+                a programming error — the config loader rejects
+                mixed-form entries upstream, so reaching this point
+                means the maps were built inconsistently.
+        """
+        overlap = set(position_rules) & set(field_rules)
+        if overlap:
+            raise ValueError(
+                f"segment(s) {sorted(overlap)} have both position and field rules; "
+                "config loader should have rejected this upstream"
+            )
+        self._position = PositionNormalizer(position_rules)
+        self._field = FieldNormalizer(field_rules)
+        self._field_segments = frozenset(field_rules)
+
+    def normalize(self, segment_name: str, raw_data: bytes, source: RecordSource) -> bytes:
+        """Return canonical bytes via the per-segment chosen normalizer."""
+        if segment_name in self._field_segments:
+            return self._field.normalize(segment_name, raw_data, source)
+        return self._position.normalize(segment_name, raw_data, source)
 
 
 def _remove_ranges(data: bytes, ranges: tuple[tuple[int, int], ...]) -> bytes:

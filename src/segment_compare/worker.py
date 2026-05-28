@@ -36,7 +36,7 @@ from typing import BinaryIO
 from segment_compare.comparator import compare_records
 from segment_compare.config import ResolvedConfig
 from segment_compare.hasher import build_hasher
-from segment_compare.normalizer import PositionNormalizer
+from segment_compare.normalizer import CompositeNormalizer
 from segment_compare.parser import Record, iter_records
 from segment_compare.writer import OutputWriter
 
@@ -116,7 +116,7 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
     config = payload.config
     payload.worker_output_dir.mkdir(parents=True, exist_ok=True)
 
-    normalizer = PositionNormalizer(config.normalization)
+    normalizer = CompositeNormalizer(config.normalization, config.field_normalization)
     hasher = build_hasher(config.runtime)
 
     matched = 0

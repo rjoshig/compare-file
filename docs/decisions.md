@@ -580,3 +580,80 @@ CLI surface:
   field together future-proof the parallel pipeline: as new
   partitioning strategies land (e.g., size-balanced for skewed
   records), they slot in via config without CLI changes.
+
+---
+
+## ADR-029 — Field-based normalization: canonical form, dispatch, single-form-per-segment
+
+**Status:** accepted
+
+**Context:** Phase 2 introduces `FieldNormalizer` alongside the
+existing `PositionNormalizer`. The two forms address different
+realities:
+
+- **Position-based** (Phase 1) — describe segment data as byte ranges
+  to strip/exclude. Right when the layout is the same across both
+  source systems and you only need to suppress specific positions
+  (timestamps, segment counts, etc.).
+- **Field-based** (Phase 2) — describe segment data as a named list
+  of logical fields, possibly differing across A and B in field
+  count, order, or per-field length. Right for cross-system
+  reconciliation where Source A emits `first/middle/last` in a
+  different physical order than Source B, or where one side carries
+  a trailing filler that the other doesn't.
+
+Three design questions came up while building this:
+
+1. What's the canonical byte form a `FieldNormalizer` emits?
+2. Can one segment use both forms in the same JSON entry?
+3. What happens when the layout's total length disagrees with the
+   segment's actual data length at runtime?
+
+**Decision:**
+
+1. **Canonical form is sorted `<name>=<value>` joined by `\x1F`
+   (ASCII Unit Separator).** Each retained field becomes
+   `name_bytes + b"=" + value_bytes`; the resulting list is sorted
+   by encoded bytes (≡ sort by ASCII name) and joined. Sorting is
+   what makes A and B with different *physical* field order produce
+   *identical* canonical bytes — the engine compares by logical
+   field name, not byte position (the headline Phase 2 capability).
+2. **A single segment cannot mix position-form and field-form keys.**
+   `_build_normalization` rejects entries that contain both kinds at
+   load time with a clear error. Different segments in the same
+   `normalization.json` may use different forms; that's the whole
+   point of `CompositeNormalizer`.
+3. **Length mismatch is a fatal error at first occurrence.** When
+   the chosen layout's `sum(field.length for ...)` doesn't equal
+   `len(raw_data)`, `FieldNormalizer.normalize` raises `ValueError`
+   with the segment name, source, expected length, actual length, and
+   field count. Layout must exactly cover the segment data — being
+   permissive here would mask config typos and schema drift.
+
+`CompositeNormalizer(position_rules, field_rules)` is the public
+type the pipeline uses; it dispatches per segment based on which map
+the segment appears in. Segments absent from both maps pass through
+unchanged. The two maps live as separate fields on `ResolvedConfig`
+(`normalization`, `field_normalization`) so the audit hash stays
+stable and existing callers that only inspect `normalization` keep
+working.
+
+**Consequences:**
+
+- The Phase 2 acceptance test
+  `tests/test_field_integration.py::test_field_config_classifies_records_same_as_position_config`
+  proves the two forms encode the same equivalence relation on the
+  realistic 10/11-record fixture: byte-identical `*.dat` outputs,
+  identical aggregate counts, identical per-segment statistics.
+- Cross-system reconciliation (A has 4 fields, B has 5 with filler
+  excluded) is now expressible in one `normalization.json` entry —
+  no parser changes, no per-segment custom code.
+- Adding new normalization forms later (e.g., a JSONPath-style
+  selector for nested formats — out of scope per ADR-015) becomes
+  another row on the `CompositeNormalizer` dispatch table, not a
+  rewrite of the comparator.
+- The separator `\x1F` and the `name=value` delimiter `=` are byte
+  values that should not appear in real fixed-format ASCII data.
+  If a future ADR opens the door to non-ASCII data, the encoding
+  may need a small escape rule; for Phase 2's ASCII-only world,
+  collisions are not possible by construction.
