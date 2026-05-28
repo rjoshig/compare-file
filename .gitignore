@@ -60,6 +60,9 @@ results*/
 runs/
 *.log
 
+# Phase 2 benchmark fixtures — multi-GB synthetic data; generated, not tracked
+tests/fixtures/
+
 # Service mode (Phase 4) — never commit live config flow directories
 pending/
 processing/

@@ -98,12 +98,13 @@ def run(
             :func:`segment_compare.config.load_config`.
         output_dir: Directory to write the eight outputs into. Created
             if absent.
-        run_timestamp: Optional UTC timestamp to use as the run's
-            identity. Defaults to the moment :func:`run` is called.
-            Used both to suffix every output filename (so successive
-            runs don't clobber each other) and as the ``start_time``
-            field in ``summary.json``. Tests pass a fixed value for
-            deterministic output names.
+        run_timestamp: Optional UTC timestamp that drives the
+            ``YYYYMMDDHHMM`` suffix on every output filename. Defaults
+            to wall-clock now if omitted. **This does not influence
+            the elapsed-time measurement** — ``summary.start_time``
+            and ``elapsed_seconds`` always reflect real wall clock so
+            throughput numbers are honest even when tests pass a
+            fixed stamp for filename determinism.
 
     Returns:
         The :class:`Summary` that was just written to
@@ -117,8 +118,8 @@ def run(
         if not path.exists():
             raise InputFileError(f"input file does not exist: {path}")
 
-    start_time = run_timestamp or datetime.now(timezone.utc)
-    filename_stamp = start_time.strftime(STAMP_FORMAT)
+    start_time = datetime.now(timezone.utc)
+    filename_stamp = (run_timestamp or start_time).strftime(STAMP_FORMAT)
     logger.info("starting comparison: %s vs %s (stamp=%s)", file_a, file_b, filename_stamp)
 
     index_a, dups_a, total_a, segments_a = _index_file(file_a, config)
