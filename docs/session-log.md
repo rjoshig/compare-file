@@ -9,6 +9,164 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-28 (pause-and-handoff to Phase 3)
+
+**Branch:** `dev` (tag `phase-2-complete` at `ffc96de`)
+**Phase:** 3 — kickoff pending
+**Status:** Phase 2 closed and tagged. Stopping for the day; next
+session resumes on Phase 3 (Vue.js 3 + FastAPI web UI).
+
+### Why we're pausing here
+
+`dev` is a clean handoff state. Phase 2 acceptance criteria #1–#6 are
+all green (see the previous session-log entry). 198 tests passing on
+pyenv 3.12.7; black, flake8, mypy --strict clean. The engine library
+is feature-complete behind `pipeline.run` and `pipeline.run_parallel`,
+which is exactly the boundary `docs/phase-3.md` expects to wrap.
+
+Two doc artifacts landed in this stopping commit that future sessions
+should rely on:
+
+- `docs/how-it-works.md` — end-to-end engine walkthrough with
+  byte-level examples + reliability math. Read this first if you're
+  picking the project up cold.
+- `README.md::CLI command reference` — every CLI option with a
+  copy-pastable example, plus seven common usage patterns for
+  smoke testing, daily reconciliation, config validation, dry-run,
+  external sort, deterministic single-process runs, and verbose
+  debugging.
+
+### Phase 3 plan (the next concrete action)
+
+Open `docs/phase-3.md` end-to-end and start the FastAPI scaffolding.
+The doc is detailed; the headline:
+
+**Tech stack** (per `docs/phase-3.md` and ADR-014):
+
+- Backend: FastAPI + uvicorn. SQLite for run history.
+- Frontend: Vue.js 3 (Composition API), Vite, plain CSS (or
+  Tailwind if it lands cleanly).
+- Communication: REST + JSON for control; SSE for live progress.
+
+**Six screens to build** (in the order the doc recommends):
+
+1. Run Configuration — file pickers, worker count slider, hash
+   method dropdown, dry-run toggle, "Start Comparison" button.
+2. Run Execution — live progress, log tail, cancel button.
+3. Results Dashboard — summary cards, mismatches-by-segment chart,
+   download buttons for all 8 outputs, paginated mismatch table,
+   per-record inspector.
+4. Run History — SQLite-backed past-run list with re-run support.
+5. Segment Selection — checkbox list of known segments with
+   sensible defaults from `config/segments.json`.
+6. Field Configuration — per-segment field-layout editor that
+   targets the Phase 2 `FieldNormalizationRule` shape.
+
+**Backend layout** (`src/segment_compare/api/`):
+
+```
+api/
+├── __init__.py
+├── main.py        # FastAPI app instance, lifespan, middleware
+├── routes.py      # endpoint handlers
+├── models.py      # pydantic request/response models
+├── runs.py        # run launcher + SSE progress channel
+└── storage.py     # SQLite run history
+```
+
+**Acceptance criteria** (from `docs/phase-3.md`):
+
+1. All six screens functional against real engine runs.
+2. FastAPI auto-docs at `/docs` reachable and accurate.
+3. SQLite run history persists across restarts.
+4. Happy-path browser test (manual checklist or Playwright) passes.
+5. CLI and API call the same `pipeline.run` function — no duplicated
+   comparison logic (ADR-012 enforcement).
+
+**Ordered task list for the next session:**
+
+1. FastAPI scaffolding: app instance, health endpoint, `/docs`
+   reachable. Add `fastapi` + `uvicorn[standard]` to
+   `pyproject.toml::[project.optional-dependencies].api`.
+2. SQLite schema + storage layer in `api/storage.py`.
+3. `POST /api/runs` endpoint that invokes `pipeline.run` /
+   `pipeline.run_parallel` in a `ProcessPoolExecutor`-backed worker
+   pool. Reuse the same `--workers` config-knob precedence
+   (ADR-028).
+4. SSE progress channel (`GET /api/runs/{id}/events`) backed by
+   per-run `asyncio.Queue`s.
+5. Output-file download endpoints (`GET /api/runs/{id}/files/{name}`)
+   restricted to the run's output dir.
+6. Vue scaffold via `npm create vite@latest` under `ui/`.
+7. `services/api.js` thin wrapper around the REST API.
+8. Screens in the order above (1, 2, 3, 4, then 5, 6).
+9. End-to-end manual test against `examples/sample_*.dat`.
+
+**Key design decisions to settle BEFORE writing code:**
+
+- **Process model for engine runs.** FastAPI is async; the engine
+  is blocking and CPU-bound. Wrap `pipeline.run` /
+  `pipeline.run_parallel` in
+  `concurrent.futures.ProcessPoolExecutor` so the event loop stays
+  responsive. The pool size should be 1 (we already parallelize
+  *inside* `pipeline.run_parallel`) — one engine run at a time,
+  not many concurrent runs trampling each other's disk + RAM.
+- **File picker security.** `/api/filesystem/browse` must be
+  restricted to a configured allowlist of roots. Symlink traversal
+  rejected. Not optional.
+- **Auth / multi-user model.** Out of scope for Phase 3 v1 (single-
+  user, single-tenant). Phase 4 service mode revisits this if
+  needed.
+- **State persistence.** SQLite-only for now; engine outputs stay
+  as files on disk. No DB for the bytes — only metadata.
+
+### What's pending
+
+- Phase 3 implementation (above).
+- Deferred Phase 2 optimizations (parallel index-build, shared-memory
+  index sharing). Not blocking.
+
+### Blockers
+
+None. The engine library and its docs are ready to be wrapped.
+
+### Decisions captured this session
+
+None new since the Phase 2 closure entry below. Three ADRs land
+this session (ADR-028 / 029 / 030) — see that entry.
+
+### Next concrete action
+
+When the next session begins, open `docs/phase-3.md`, agree with the
+user on the process-model question above (single-run-at-a-time
+ProcessPoolExecutor wrapping `pipeline.run_parallel`), then start
+Phase 3 step 1: FastAPI scaffolding + health endpoint + `/docs`
+reachable. Add dependencies to `pyproject.toml` under a new
+`[project.optional-dependencies].api` extra so the engine remains
+import-clean for non-API users.
+
+### Notes for future me
+
+- The realistic 10/11-record fixture is the canonical Phase 3
+  end-to-end manual-test target. The 3M synthetic in
+  `tests/fixtures/` is for benchmarking, not for clicking through
+  the UI.
+- The engine never produces summary.json in <100 ms for the
+  realistic fixture, so the UI's "Run Execution" screen can do
+  polling at 250 ms intervals without missing the completion edge.
+  Use SSE anyway — it's cheaper for the 3M case where the run
+  takes 2 minutes.
+- pyenv 3.12.7 still pinned. `~/.pyenv/shims/python` is the
+  interpreter; this Bash tool needs the full path because the
+  shim dir isn't in its PATH.
+- Git identity is finally configured globally
+  (`rjoshig <30200211+rjoshig@users.noreply.github.com>`) so all
+  future commits will show the right author. The two pre-fix
+  commits (`f38d666`, `6b8a693`) still have the hostname identity;
+  the user opted to leave them rather than rewrite history.
+
+---
+
 ## Session: 2026-05-28 (Phase 2 closure — parallelism, field-normalizer, external sort)
 
 **Branch:** `dev`

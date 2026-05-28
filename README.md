@@ -99,6 +99,216 @@ Order of precedence: **CLI flag > config file**. See **ADR-028** for
 why 8 is the default and **`docs/benchmarks/phase-2.md`** for the
 measured speedup curve.
 
+### CLI command reference
+
+Every option, with a one-line description and a copy-pastable example.
+
+#### `--file-a` / `--file-b` (required for runs)
+
+Paths to the two input files. Required for every mode except
+`--validate-config` and the `--version` / `--help` exits.
+
+```bash
+python -m segment_compare \
+    --file-a /data/today/source_a.dat \
+    --file-b /data/today/source_b.dat \
+    --config-dir config/ \
+    --output-dir results/
+```
+
+#### `--config-dir` (required)
+
+Directory containing `segments.json`, `normalization.json`, and
+`runtime.json`. Validated at startup; bad config exits 10.
+
+```bash
+# Stock config
+python -m segment_compare --config-dir config/ ...
+
+# Custom config (e.g., a different normalization profile)
+python -m segment_compare --config-dir /etc/segment-compare/strict/ ...
+```
+
+#### `--output-dir` (required for runs)
+
+Directory the eight output files land in. Created if missing.
+Filenames are stamped `<base>_YYYYMMDDHHMM.<ext>` (UTC) so re-runs
+sit beside each other (ADR-027).
+
+```bash
+python -m segment_compare ... --output-dir /var/log/segcmp/$(date +%Y%m%d)/
+```
+
+#### `--workers N`
+
+Number of worker processes. **Default reads `runtime.json::parallel_workers`**
+(stock config: 8). The CLI flag overrides the config (ADR-028).
+
+```bash
+# Use the config default (8 workers in stock config)
+python -m segment_compare ...
+
+# Force the single-process Phase 1 code path (deterministic, no IPC)
+python -m segment_compare --workers 1 ...
+
+# Tune for your hardware
+python -m segment_compare --workers 4 ...   # 4-core box
+python -m segment_compare --workers 16 ...  # 16-core production server
+```
+
+Output is byte-identical across worker counts (`tests/test_parallel.py`
+pins this) so you can tune workers without worrying about
+correctness drift.
+
+#### `--external-sort`
+
+Force a chunk-and-merge sort of both inputs before the
+comparison. By default the engine trusts `runtime.json::input_sorted`
+(stock: `true`). Pass this flag when input sort order is unknown
+or you've just received unsorted output from an upstream system.
+
+```bash
+# Inputs may not be sorted by key
+python -m segment_compare --external-sort \
+    --file-a /unsorted/a.dat --file-b /unsorted/b.dat \
+    --config-dir config/ --output-dir results/
+```
+
+Sorted intermediates land in `runtime.json::sort_temp_dir`
+(stock: `/tmp/segment_compare`) as `sorted_a_<stamp>.dat` /
+`sorted_b_<stamp>.dat`. The `summary.json` records the original
+input paths, not these temp files (ADR-030).
+
+Alternatively, flip `runtime.json::input_sorted` to `false`
+permanently and the engine will sort on every run without a flag.
+
+#### `--dry-run`
+
+Parse and validate both input files without producing any output
+files. Reports record counts and duplicate-key counts so an
+operator can sanity-check inputs before paying for a full
+comparison.
+
+```bash
+python -m segment_compare --dry-run \
+    --file-a /data/today/source_a.dat \
+    --file-b /data/today/source_b.dat \
+    --config-dir config/ \
+    --output-dir /tmp/unused/
+
+# Output:
+#   dry-run OK: A=2955017 records (17888 dup occurrences), B=2954868 records (17908 dup occurrences)
+```
+
+Exit 0 on success, 11 on missing input, 20 on parse error, 10 on
+bad config. The `--output-dir` argument is still required by
+argparse but is never touched.
+
+#### `--validate-config`
+
+Load and validate the three config files without touching the
+inputs. Useful in CI / deploy pipelines to catch config drift
+before scheduling a real run.
+
+```bash
+python -m segment_compare --validate-config --config-dir config/
+
+# Output:
+#   config OK (audit hash: cc28308289c70addf18152208c4a4531a9a0bff85e7c54179dfbb5e61a58a8b6)
+```
+
+Exit 0 on valid config, 10 on any `ConfigError`. The audit hash
+printed matches `summary.json::config_audit_hash` for any run that
+later uses this config (ADR-017).
+
+#### `--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}`
+
+Logging verbosity (default `INFO`). Logs go to stderr.
+
+```bash
+# Quieter: only warnings and errors
+python -m segment_compare --log-level WARNING ...
+
+# Noisier: see the per-stage timings and per-worker progress
+python -m segment_compare --log-level DEBUG ...
+```
+
+#### `--version`
+
+Print the engine version and exit. Useful for embedding in run
+metadata or for confirming which version is installed.
+
+```bash
+python -m segment_compare --version
+# segment-compare 0.0.1
+```
+
+### Exit codes
+
+```
+0   success, no mismatches
+1   success, mismatches found
+2   completed with warnings (orphan keys or duplicate keys present)
+10  config validation error
+11  input file not found
+12  output write error
+20  parse error (corrupt input)
+30  unexpected runtime error
+```
+
+Exit-code priority when multiple conditions hold: mismatches (1)
+outranks orphans/dups (2). A successful run with no anomalies
+returns 0.
+
+### Common usage patterns
+
+```bash
+# 1. Smoke-test the engine against the committed fixture
+python -m segment_compare \
+    --file-a examples/sample_a.dat \
+    --file-b examples/sample_b.dat \
+    --config-dir config/ \
+    --output-dir results/
+
+# 2. Daily reconciliation, parallel, pre-sorted inputs
+python -m segment_compare \
+    --file-a /data/$(date +%Y%m%d)/extract_a.dat \
+    --file-b /data/$(date +%Y%m%d)/extract_b.dat \
+    --config-dir /etc/segment-compare/prod/ \
+    --output-dir /var/log/segcmp/$(date +%Y%m%d)/ \
+    --workers 8
+
+# 3. Validate a new config before promoting to prod
+python -m segment_compare --validate-config --config-dir /etc/segment-compare/new/
+
+# 4. Quick check on incoming files (parse + count, no comparison)
+python -m segment_compare --dry-run \
+    --file-a /staging/incoming_a.dat \
+    --file-b /staging/incoming_b.dat \
+    --config-dir config/ \
+    --output-dir /tmp/unused/
+
+# 5. One-off comparison on unsorted ad-hoc files
+python -m segment_compare --external-sort \
+    --file-a /tmp/ad_hoc_a.dat \
+    --file-b /tmp/ad_hoc_b.dat \
+    --config-dir config/ \
+    --output-dir results/
+
+# 6. Deterministic single-process run (e.g., for diffing summary.json
+#    fields where worker timing variance would mask real changes)
+python -m segment_compare --workers 1 \
+    --file-a A --file-b B --config-dir config/ --output-dir results/
+
+# 7. Verbose debug run (parsing problem, suspected corruption)
+python -m segment_compare --log-level DEBUG \
+    --file-a A --file-b B --config-dir config/ --output-dir results/ 2> debug.log
+```
+
+For the full step-by-step explanation of what happens between
+`python -m segment_compare ...` and the eight output files, see
+**[docs/how-it-works.md](docs/how-it-works.md)**.
+
 ## Repository layout
 
 ```
