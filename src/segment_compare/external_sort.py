@@ -33,8 +33,7 @@ import tempfile
 from pathlib import Path
 from typing import Iterator
 
-from segment_compare.config import ResolvedConfig
-from segment_compare.parser import RdwConfig, iter_records
+from segment_compare.parser import ParserConfig, RdwConfig, SegmentsConfig, iter_records
 
 logger = logging.getLogger(__name__)
 
@@ -42,27 +41,35 @@ logger = logging.getLogger(__name__)
 def external_sort_file(
     input_path: Path,
     output_path: Path,
-    config: ResolvedConfig,
+    parser_cfg: ParserConfig,
+    segments_cfg: SegmentsConfig,
+    chunk_size: int,
+    sort_temp_dir: Path,
     rdw_cfg: RdwConfig | None = None,
+    strip_size: int = 0,
 ) -> int:
     """Read records from ``input_path``, write sorted-by-key records to ``output_path``.
 
     Args:
         input_path: Path to a fixed-format segment file. Records may
             be in any order; their byte layout must be valid per the
-            config (parser knobs, segment framing).
+            parser knobs and segment framing.
         output_path: Destination for the sorted record stream. Parent
             directory is created if missing. Existing file is
             overwritten.
-        config: Loaded :class:`ResolvedConfig`. ``runtime.chunk_size``
-            controls the in-memory buffer size; ``runtime.sort_temp_dir``
-            is the directory where spill files land (created if absent
-            and deleted after the merge completes).
+        parser_cfg: Byte-level parser knobs for ``input_path``.
+        segments_cfg: Record framing for ``input_path``.
+        chunk_size: In-memory record buffer size per spill batch.
+        sort_temp_dir: Directory where spill files land (created if
+            absent and deleted after the merge completes).
         rdw_cfg: Optional Record Descriptor Word prefix declared for
             ``input_path``. When provided, the spill pass consumes
             ``rdw_cfg.total_bytes`` before each record's key segment
             and discards them, so the sorted output never carries an
             RDW prefix.
+        strip_size: Per-record opaque leading-byte strip for
+            ``input_path`` (consumed before RDW). The sorted output
+            never carries this prefix either.
 
     Returns:
         The number of records sorted (also the number of records
@@ -70,14 +77,12 @@ def external_sort_file(
 
     Side effects:
         Writes ``output_path``. Creates and deletes temp chunk files
-        in ``runtime.sort_temp_dir``. On exception the chunks are
-        still cleaned up.
+        in ``sort_temp_dir``. On exception the chunks are still cleaned
+        up.
     """
-    sort_dir = config.runtime.sort_temp_dir
-    sort_dir.mkdir(parents=True, exist_ok=True)
+    sort_temp_dir.mkdir(parents=True, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    chunk_size = config.runtime.chunk_size
-    delimiter = config.segments.record_delimiter
+    delimiter = segments_cfg.record_delimiter
 
     chunk_paths: list[Path] = []
     record_count = 0
@@ -85,14 +90,16 @@ def external_sort_file(
         # Pass 1: chunk + sort + spill.
         with input_path.open("rb") as fh:
             batch: list[tuple[str, bytes]] = []
-            for rec in iter_records(fh, config.parser, config.segments, rdw_cfg):
+            for rec in iter_records(
+                fh, parser_cfg, segments_cfg, rdw_cfg, strip_leading_bytes=strip_size
+            ):
                 batch.append((rec.key, rec.raw))
                 record_count += 1
                 if len(batch) >= chunk_size:
-                    chunk_paths.append(_spill_sorted_chunk(batch, sort_dir, delimiter))
+                    chunk_paths.append(_spill_sorted_chunk(batch, sort_temp_dir, delimiter))
                     batch.clear()
             if batch:
-                chunk_paths.append(_spill_sorted_chunk(batch, sort_dir, delimiter))
+                chunk_paths.append(_spill_sorted_chunk(batch, sort_temp_dir, delimiter))
 
         logger.info(
             "external sort: %s → %s (%d records, %d chunks, chunk_size=%d)",
@@ -103,8 +110,10 @@ def external_sort_file(
             chunk_size,
         )
 
-        # Pass 2: merge.
-        _merge_sorted_chunks(chunk_paths, output_path, config)
+        # Pass 2: merge. Merged chunks were written by us without any
+        # RDW / leading-bytes prefix, so the merge re-parse uses the
+        # bare parser_cfg + segments_cfg.
+        _merge_sorted_chunks(chunk_paths, output_path, parser_cfg, segments_cfg)
 
     finally:
         for p in chunk_paths:
@@ -132,7 +141,10 @@ def _spill_sorted_chunk(batch: list[tuple[str, bytes]], sort_dir: Path, delimite
 
 
 def _merge_sorted_chunks(
-    chunk_paths: list[Path], output_path: Path, config: ResolvedConfig
+    chunk_paths: list[Path],
+    output_path: Path,
+    parser_cfg: ParserConfig,
+    segments_cfg: SegmentsConfig,
 ) -> None:
     """Interleave records from all sorted chunk files into ``output_path``.
 
@@ -146,7 +158,7 @@ def _merge_sorted_chunks(
         return
 
     streams: list[Iterator[tuple[str, bytes]]] = [
-        _records_with_delimiter(p, config) for p in chunk_paths
+        _records_with_delimiter(p, parser_cfg, segments_cfg) for p in chunk_paths
     ]
     try:
         with output_path.open("wb") as out:
@@ -162,10 +174,10 @@ def _merge_sorted_chunks(
 
 
 def _records_with_delimiter(
-    chunk_path: Path, config: ResolvedConfig
+    chunk_path: Path, parser_cfg: ParserConfig, segments_cfg: SegmentsConfig
 ) -> Iterator[tuple[str, bytes]]:
     """Yield ``(key, raw_with_delimiter)`` tuples from one chunk file."""
-    delimiter = config.segments.record_delimiter
+    delimiter = segments_cfg.record_delimiter
     with chunk_path.open("rb") as fh:
-        for rec in iter_records(fh, config.parser, config.segments):
+        for rec in iter_records(fh, parser_cfg, segments_cfg):
             yield (rec.key, rec.raw + delimiter if delimiter else rec.raw)

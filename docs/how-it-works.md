@@ -10,6 +10,15 @@ This is the "I want to understand the engine before trusting it"
 document. ADRs in `decisions.md` cover the *why* of individual
 choices; this document covers the *how* end-to-end.
 
+> **Heads-up (ADR-033):** Some snippets below still reference the
+> legacy `segments.json` + `normalization.json` config files and the
+> position-based `exclude_positions` form. The current engine uses
+> two per-file layouts (`config/layout_file_A.json` +
+> `config/layout_file_B.json`) plus `config/runtime.json`; the
+> equivalent of `exclude_positions` is a per-field `"exclude": true`
+> in the layout. The byte-level pipeline (parse → index → normalize
+> → hash → compare) described here is unchanged.
+
 ---
 
 ## TL;DR

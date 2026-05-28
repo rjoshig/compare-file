@@ -34,12 +34,12 @@ from typing import BinaryIO
 from segment_compare import __version__
 from concurrent.futures import ProcessPoolExecutor
 from segment_compare.comparator import compare_records
-from segment_compare.config import ResolvedConfig
+from segment_compare.config import EngineConfig
 from segment_compare.external_sort import external_sort_file
 from segment_compare.hasher import build_hasher
 from segment_compare.merger import fold_partial_summaries, merge_worker_outputs
-from segment_compare.normalizer import CompositeNormalizer
-from segment_compare.parser import Record, RdwConfig, iter_records
+from segment_compare.normalizer import FieldNormalizer
+from segment_compare.parser import ParserConfig, Record, RdwConfig, SegmentsConfig, iter_records
 from segment_compare.partitioner import equal_count_partition
 from segment_compare.worker import WorkerPayload, WorkerResult, run_worker
 from segment_compare.writer import (
@@ -75,7 +75,7 @@ class DryRunReport:
     dups_in_b: int
 
 
-def dry_run(file_a: Path, file_b: Path, config: ResolvedConfig) -> DryRunReport:
+def dry_run(file_a: Path, file_b: Path, config: EngineConfig) -> DryRunReport:
     """Parse both inputs without comparing or writing outputs.
 
     Surfaces parse errors and duplicate-key counts early so an operator
@@ -84,8 +84,20 @@ def dry_run(file_a: Path, file_b: Path, config: ResolvedConfig) -> DryRunReport:
     for path in (file_a, file_b):
         if not path.exists():
             raise InputFileError(f"input file does not exist: {path}")
-    _, dups_a, total_a, _ = _index_file(file_a, config, config.file_a_rdw)
-    _, dups_b, total_b, _ = _index_file(file_b, config, config.file_b_rdw)
+    _, dups_a, total_a, _ = _index_file(
+        file_a,
+        config.parser_a,
+        config.segments_a,
+        config.file_a_rdw,
+        config.file_a_strip_size,
+    )
+    _, dups_b, total_b, _ = _index_file(
+        file_b,
+        config.parser_b,
+        config.segments_b,
+        config.file_b_rdw,
+        config.file_b_strip_size,
+    )
     return DryRunReport(
         file_a_records=total_a,
         file_b_records=total_b,
@@ -97,7 +109,7 @@ def dry_run(file_a: Path, file_b: Path, config: ResolvedConfig) -> DryRunReport:
 def run(
     file_a: Path,
     file_b: Path,
-    config: ResolvedConfig,
+    config: EngineConfig,
     output_dir: Path,
     run_timestamp: datetime | None = None,
     external_sort: bool = False,
@@ -138,15 +150,32 @@ def run(
     original_file_a, original_file_b = file_a, file_b
     rdw_a: RdwConfig | None = config.file_a_rdw
     rdw_b: RdwConfig | None = config.file_b_rdw
-    if external_sort or not config.runtime.input_sorted:
+    strip_a = config.file_a_strip_size
+    strip_b = config.file_b_strip_size
+    parser_a = config.parser_a
+    parser_b = config.parser_b
+    segments_a_cfg = config.segments_a
+    segments_b_cfg = config.segments_b
+    if (
+        external_sort
+        or not config.layout_a.sort.input_sorted
+        or not config.layout_b.sort.input_sorted
+    ):
         file_a, file_b = _external_sort_inputs(file_a, file_b, config, filename_stamp)
-        # The sorted temp copies are written by the engine without an RDW
-        # prefix, so downstream passes must not try to skip it.
+        # The sorted temp copies are written by the engine without RDW or
+        # leading-byte strip prefixes, so downstream passes must not try
+        # to skip them.
         rdw_a = None
         rdw_b = None
+        strip_a = 0
+        strip_b = 0
 
-    index_a, dups_a, total_a, segments_a = _index_file(file_a, config, rdw_a)
-    index_b, dups_b, total_b, segments_b = _index_file(file_b, config, rdw_b)
+    index_a, dups_a, total_a, segments_a = _index_file(
+        file_a, parser_a, segments_a_cfg, rdw_a, strip_a
+    )
+    index_b, dups_b, total_b, segments_b = _index_file(
+        file_b, parser_b, segments_b_cfg, rdw_b, strip_b
+    )
     logger.info(
         "indexed: A=%d records (%d dup keys), B=%d records (%d dup keys)",
         total_a,
@@ -161,7 +190,7 @@ def run(
     only_b_keys = sorted(keys_b - keys_a)
     both_keys = sorted(keys_a & keys_b)
 
-    normalizer = CompositeNormalizer(config.normalization, config.field_normalization)
+    normalizer = FieldNormalizer(config.normalization)
     hasher = build_hasher(config.runtime)
 
     records_matched = 0
@@ -169,16 +198,16 @@ def run(
     per_segment_match: dict[str, int] = defaultdict(int)
     per_segment_mismatch: dict[str, int] = defaultdict(int)
 
-    with OutputWriter(output_dir, config.segments, filename_stamp=filename_stamp) as writer:
-        _write_dups(file_a, dups_a, config, writer.write_dup_a)
-        _write_dups(file_b, dups_b, config, writer.write_dup_b)
+    with OutputWriter(output_dir, segments_a_cfg, filename_stamp=filename_stamp) as writer:
+        _write_dups(file_a, dups_a, parser_a, segments_a_cfg, writer.write_dup_a)
+        _write_dups(file_b, dups_b, parser_b, segments_b_cfg, writer.write_dup_b)
 
         with file_a.open("rb") as fh_a, file_b.open("rb") as fh_b:
             for key in both_keys:
                 off_a, len_a = index_a[key]
                 off_b, len_b = index_b[key]
-                rec_a = _read_record_at(fh_a, off_a, len_a, config)
-                rec_b = _read_record_at(fh_b, off_b, len_b, config)
+                rec_a = _read_record_at(fh_a, off_a, len_a, parser_a, segments_a_cfg)
+                rec_b = _read_record_at(fh_b, off_b, len_b, parser_b, segments_b_cfg)
                 verdict = compare_records(rec_a, rec_b, normalizer, hasher)
 
                 if verdict.matched:
@@ -194,8 +223,12 @@ def run(
                     else:
                         per_segment_mismatch[sv.segment_name] += 1
 
-        _write_key_only(file_a, only_a_keys, index_a, config, writer.write_key_only_a)
-        _write_key_only(file_b, only_b_keys, index_b, config, writer.write_key_only_b)
+        _write_key_only(
+            file_a, only_a_keys, index_a, parser_a, segments_a_cfg, writer.write_key_only_a
+        )
+        _write_key_only(
+            file_b, only_b_keys, index_b, parser_b, segments_b_cfg, writer.write_key_only_b
+        )
 
         end_time = datetime.now(timezone.utc)
         elapsed = (end_time - start_time).total_seconds()
@@ -245,7 +278,7 @@ def run(
 def run_parallel(
     file_a: Path,
     file_b: Path,
-    config: ResolvedConfig,
+    config: EngineConfig,
     output_dir: Path,
     workers: int,
     run_timestamp: datetime | None = None,
@@ -305,13 +338,29 @@ def run_parallel(
     original_file_a, original_file_b = file_a, file_b
     rdw_a: RdwConfig | None = config.file_a_rdw
     rdw_b: RdwConfig | None = config.file_b_rdw
-    if external_sort or not config.runtime.input_sorted:
+    strip_a = config.file_a_strip_size
+    strip_b = config.file_b_strip_size
+    parser_a = config.parser_a
+    parser_b = config.parser_b
+    segments_a_cfg = config.segments_a
+    segments_b_cfg = config.segments_b
+    if (
+        external_sort
+        or not config.layout_a.sort.input_sorted
+        or not config.layout_b.sort.input_sorted
+    ):
         file_a, file_b = _external_sort_inputs(file_a, file_b, config, filename_stamp)
         rdw_a = None
         rdw_b = None
+        strip_a = 0
+        strip_b = 0
 
-    index_a, dups_a, total_a, segments_a = _index_file(file_a, config, rdw_a)
-    index_b, dups_b, total_b, segments_b = _index_file(file_b, config, rdw_b)
+    index_a, dups_a, total_a, segments_a = _index_file(
+        file_a, parser_a, segments_a_cfg, rdw_a, strip_a
+    )
+    index_b, dups_b, total_b, segments_b = _index_file(
+        file_b, parser_b, segments_b_cfg, rdw_b, strip_b
+    )
     logger.info(
         "indexed: A=%d records (%d dup keys), B=%d records (%d dup keys)",
         total_a,
@@ -332,11 +381,15 @@ def run_parallel(
     # Master-owned outputs (orphans + dups). Written single-process via the
     # normal OutputWriter; matches/mismatches/report stay empty in the master
     # writer because those come from workers and are merged in afterwards.
-    with OutputWriter(output_dir, config.segments, filename_stamp=filename_stamp) as master_writer:
-        _write_dups(file_a, dups_a, config, master_writer.write_dup_a)
-        _write_dups(file_b, dups_b, config, master_writer.write_dup_b)
-        _write_key_only(file_a, only_a_keys, index_a, config, master_writer.write_key_only_a)
-        _write_key_only(file_b, only_b_keys, index_b, config, master_writer.write_key_only_b)
+    with OutputWriter(output_dir, segments_a_cfg, filename_stamp=filename_stamp) as master_writer:
+        _write_dups(file_a, dups_a, parser_a, segments_a_cfg, master_writer.write_dup_a)
+        _write_dups(file_b, dups_b, parser_b, segments_b_cfg, master_writer.write_dup_b)
+        _write_key_only(
+            file_a, only_a_keys, index_a, parser_a, segments_a_cfg, master_writer.write_key_only_a
+        )
+        _write_key_only(
+            file_b, only_b_keys, index_b, parser_b, segments_b_cfg, master_writer.write_key_only_b
+        )
         # Drop the master's empty matches.dat / mismatches.dat / report.csv;
         # the merger overwrites these paths anyway, but deleting now keeps
         # the on-disk state coherent if a worker crashes before merging.
@@ -438,7 +491,13 @@ def run_parallel(
 # ---------------------------------------------------------------------------
 
 
-def _index_file(path: Path, config: ResolvedConfig, rdw_cfg: RdwConfig | None = None) -> tuple[
+def _index_file(
+    path: Path,
+    parser_cfg: ParserConfig,
+    segments_cfg: SegmentsConfig,
+    rdw_cfg: RdwConfig | None,
+    strip_size: int,
+) -> tuple[
     dict[str, tuple[int, int]],
     dict[str, list[tuple[int, int]]],
     int,
@@ -448,10 +507,13 @@ def _index_file(path: Path, config: ResolvedConfig, rdw_cfg: RdwConfig | None = 
 
     Args:
         path: File to scan.
-        config: Resolved engine config.
+        parser_cfg: This file's byte-level parser knobs.
+        segments_cfg: This file's record-framing config (per-file
+            key_segment / end_segment / key_range / record_delimiter).
         rdw_cfg: Optional per-file RDW prefix to skip before each record.
             Pass ``None`` when reading an engine-written file (sorted
             temp output) since those never carry an RDW prefix.
+        strip_size: Per-record opaque leading-byte strip, 0 if absent.
 
     Returns:
         ``(good_index, dup_offsets, total_records, segment_counts)``.
@@ -470,7 +532,9 @@ def _index_file(path: Path, config: ResolvedConfig, rdw_cfg: RdwConfig | None = 
     total_records = 0
 
     with path.open("rb") as fh:
-        for record in iter_records(fh, config.parser, config.segments, rdw_cfg):
+        for record in iter_records(
+            fh, parser_cfg, segments_cfg, rdw_cfg, strip_leading_bytes=strip_size
+        ):
             total_records += 1
             for seg in record.segments:
                 segment_counts[seg.name] += 1
@@ -487,11 +551,22 @@ def _index_file(path: Path, config: ResolvedConfig, rdw_cfg: RdwConfig | None = 
     return good_index, dup_offsets, total_records, segment_counts
 
 
-def _read_record_at(stream: BinaryIO, offset: int, length: int, config: ResolvedConfig) -> Record:
-    """Seek to ``offset`` in ``stream`` and parse the record there."""
+def _read_record_at(
+    stream: BinaryIO,
+    offset: int,
+    length: int,
+    parser_cfg: ParserConfig,
+    segments_cfg: SegmentsConfig,
+) -> Record:
+    """Seek to ``offset`` in ``stream`` and parse the record there.
+
+    ``offset`` and ``length`` already point past any RDW or
+    leading-byte strip (set during :func:`_index_file`), so no
+    additional prefix-skipping is needed here.
+    """
     stream.seek(offset)
     buf = stream.read(length)
-    parsed = list(iter_records(io.BytesIO(buf), config.parser, config.segments))
+    parsed = list(iter_records(io.BytesIO(buf), parser_cfg, segments_cfg))
     if not parsed:
         raise InputFileError(f"no record could be parsed at offset {offset} (length {length})")
     return parsed[0]
@@ -500,7 +575,8 @@ def _read_record_at(stream: BinaryIO, offset: int, length: int, config: Resolved
 def _write_dups(
     path: Path,
     dups: dict[str, list[tuple[int, int]]],
-    config: ResolvedConfig,
+    parser_cfg: ParserConfig,
+    segments_cfg: SegmentsConfig,
     write_fn: "object",
 ) -> None:
     """Write every duplicate-key record's bytes via ``write_fn``."""
@@ -509,7 +585,7 @@ def _write_dups(
     with path.open("rb") as fh:
         for entries in dups.values():
             for off, length in entries:
-                rec = _read_record_at(fh, off, length, config)
+                rec = _read_record_at(fh, off, length, parser_cfg, segments_cfg)
                 write_fn(rec)  # type: ignore[operator]
 
 
@@ -517,7 +593,8 @@ def _write_key_only(
     path: Path,
     keys: list[str],
     index: dict[str, tuple[int, int]],
-    config: ResolvedConfig,
+    parser_cfg: ParserConfig,
+    segments_cfg: SegmentsConfig,
     write_fn: "object",
 ) -> None:
     """Write each orphan-key record's bytes via ``write_fn``."""
@@ -526,12 +603,12 @@ def _write_key_only(
     with path.open("rb") as fh:
         for key in keys:
             off, length = index[key]
-            rec = _read_record_at(fh, off, length, config)
+            rec = _read_record_at(fh, off, length, parser_cfg, segments_cfg)
             write_fn(rec)  # type: ignore[operator]
 
 
 def _external_sort_inputs(
-    file_a: Path, file_b: Path, config: ResolvedConfig, filename_stamp: str
+    file_a: Path, file_b: Path, config: EngineConfig, filename_stamp: str
 ) -> tuple[Path, Path]:
     """Sort both inputs via the external-sort pass and return the sorted paths.
 
@@ -545,9 +622,27 @@ def _external_sort_inputs(
     sorted_a = sort_dir / f"sorted_a_{filename_stamp}.dat"
     sorted_b = sort_dir / f"sorted_b_{filename_stamp}.dat"
     logger.info("external-sort: %s -> %s", file_a, sorted_a)
-    external_sort_file(file_a, sorted_a, config, rdw_cfg=config.file_a_rdw)
+    external_sort_file(
+        file_a,
+        sorted_a,
+        config.parser_a,
+        config.segments_a,
+        config.runtime.chunk_size,
+        config.runtime.sort_temp_dir,
+        rdw_cfg=config.file_a_rdw,
+        strip_size=config.file_a_strip_size,
+    )
     logger.info("external-sort: %s -> %s", file_b, sorted_b)
-    external_sort_file(file_b, sorted_b, config, rdw_cfg=config.file_b_rdw)
+    external_sort_file(
+        file_b,
+        sorted_b,
+        config.parser_b,
+        config.segments_b,
+        config.runtime.chunk_size,
+        config.runtime.sort_temp_dir,
+        rdw_cfg=config.file_b_rdw,
+        strip_size=config.file_b_strip_size,
+    )
     return sorted_a, sorted_b
 
 

@@ -19,13 +19,10 @@ def _runtime(hash_method: str = "blake2b", digest_size: int = 16) -> RuntimeConf
     return RuntimeConfig(
         hash_method=hash_method,
         blake2b_digest_size=digest_size,
-        input_sorted=True,
         sort_temp_dir=Path("/tmp/segment_compare"),
         parallel_workers=1,
         chunk_size=10000,
         partition_strategy="equal_count",
-        key_type="alphanumeric",
-        key_sort_order="ascending",
     )
 
 
@@ -134,13 +131,10 @@ def test_build_hasher_unknown_method_raises() -> None:
     bad = RuntimeConfig(
         hash_method="md5",  # bypasses ConfigError to exercise the guard
         blake2b_digest_size=16,
-        input_sorted=True,
         sort_temp_dir=Path("/tmp"),
         parallel_workers=1,
         chunk_size=1,
         partition_strategy="equal_count",
-        key_type="alphanumeric",
-        key_sort_order="ascending",
     )
     with pytest.raises(ValueError):
         build_hasher(bad)

@@ -158,7 +158,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--config-dir",
         type=Path,
         required=True,
-        help=("Directory containing segments.json, normalization.json, and " "runtime.json."),
+        help=(
+            "Directory containing layout_file_A.json, layout_file_B.json, "
+            "and runtime.json (ADR-033)."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -182,10 +185,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Force an external chunk-and-merge sort pass on both inputs "
-            "before comparison. By default the engine follows "
-            "runtime.json::input_sorted (true → skip sort, assume inputs "
-            "are pre-sorted by key). Pass this flag when input order is "
-            "unknown or known-unsorted. Sorted copies land in "
+            "before comparison. By default the engine follows each "
+            "layout's sort.input_sorted (true → skip sort, assume that "
+            "input is pre-sorted by key); the engine sorts whichever "
+            "side declares input_sorted=false. Pass this flag to force "
+            "the sort on both sides regardless. Sorted copies land in "
             "runtime.json::sort_temp_dir as sorted_a_<stamp>.dat / "
             "sorted_b_<stamp>.dat."
         ),

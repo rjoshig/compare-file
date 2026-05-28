@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace as _replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from segment_compare.config import load_config
+from segment_compare.config import EngineConfig, load_config
 from segment_compare.external_sort import external_sort_file
 from segment_compare.parser import iter_records
 from segment_compare.pipeline import run
@@ -24,26 +25,53 @@ def _stamped(out: Path, base: str) -> Path:
     return out / stamped_filename(base, FIXED_STAMP)
 
 
-def _read_records(path: Path, config) -> list[str]:
-    """Return the list of record keys in file order."""
+def _read_keys(path: Path, config: EngineConfig) -> list[str]:
+    """Return the list of record keys in file order (assumes path has File A's layout)."""
     with path.open("rb") as fh:
-        return [r.key for r in iter_records(fh, config.parser, config.segments)]
+        return [r.key for r in iter_records(fh, config.parser_a, config.segments_a)]
 
 
-def _shuffle_records(src: Path, dst: Path, config, seed: int = 42) -> None:
+def _shuffle_records(src: Path, dst: Path, config: EngineConfig, seed: int = 42) -> None:
     """Read records from ``src``, shuffle by key, write to ``dst``.
 
-    Preserves the raw bytes; only the record order changes.
+    Preserves the raw bytes; only the record order changes. Assumes
+    ``src`` is in File A's layout (which is true for the realistic
+    sample fixtures shared between A and B).
     """
-    delimiter = config.segments.record_delimiter
+    delimiter = config.segments_a.record_delimiter
     with src.open("rb") as fh:
-        records = [r.raw for r in iter_records(fh, config.parser, config.segments)]
+        records = [r.raw for r in iter_records(fh, config.parser_a, config.segments_a)]
     random.Random(seed).shuffle(records)
     with dst.open("wb") as out:
         for raw in records:
             out.write(raw)
             if delimiter:
                 out.write(delimiter)
+
+
+def _sort_a(path: Path, dst: Path, config: EngineConfig) -> int:
+    """Call ``external_sort_file`` for File A using the engine config's accessors."""
+    return external_sort_file(
+        path,
+        dst,
+        config.parser_a,
+        config.segments_a,
+        config.runtime.chunk_size,
+        config.runtime.sort_temp_dir,
+        rdw_cfg=config.file_a_rdw,
+        strip_size=config.file_a_strip_size,
+    )
+
+
+def _set_input_sorted(config: EngineConfig, value: bool) -> EngineConfig:
+    """Return a config where both layouts' sort.input_sorted is set to ``value``."""
+    new_layout_a = _replace(
+        config.layout_a, sort=_replace(config.layout_a.sort, input_sorted=value)
+    )
+    new_layout_b = _replace(
+        config.layout_b, sort=_replace(config.layout_b.sort, input_sorted=value)
+    )
+    return _replace(config, layout_a=new_layout_a, layout_b=new_layout_b)
 
 
 # ---------------------------------------------------------------------------
@@ -56,14 +84,14 @@ def test_external_sort_orders_records_by_key(tmp_path: Path) -> None:
     # Take the realistic sample (already sorted), shuffle to make unsorted input.
     shuffled = tmp_path / "shuffled_a.dat"
     _shuffle_records(EXAMPLES / "sample_a.dat", shuffled, config)
-    keys_before = _read_records(shuffled, config)
+    keys_before = _read_keys(shuffled, config)
     assert keys_before != sorted(keys_before), "shuffle should produce unsorted order"
 
     sorted_out = tmp_path / "sorted_a.dat"
-    n = external_sort_file(shuffled, sorted_out, config)
+    n = _sort_a(shuffled, sorted_out, config)
 
     assert n == len(keys_before)
-    keys_after = _read_records(sorted_out, config)
+    keys_after = _read_keys(sorted_out, config)
     assert keys_after == sorted(keys_before)
     # Dup keys (KEY...08 appears twice in sample_a) survive intact.
     assert keys_after.count("KEY000000008") == 2
@@ -73,7 +101,7 @@ def test_external_sort_is_idempotent_on_sorted_input(tmp_path: Path) -> None:
     """Already-sorted input must come back byte-identical."""
     config = load_config(CONFIG_DIR)
     out = tmp_path / "sorted_a.dat"
-    external_sort_file(EXAMPLES / "sample_a.dat", out, config)
+    _sort_a(EXAMPLES / "sample_a.dat", out, config)
     assert out.read_bytes() == (EXAMPLES / "sample_a.dat").read_bytes()
 
 
@@ -82,7 +110,7 @@ def test_external_sort_empty_input_yields_empty_output(tmp_path: Path) -> None:
     empty_in = tmp_path / "empty.dat"
     empty_in.write_bytes(b"")
     out = tmp_path / "sorted.dat"
-    n = external_sort_file(empty_in, out, config)
+    n = _sort_a(empty_in, out, config)
     assert n == 0
     assert out.read_bytes() == b""
 
@@ -94,26 +122,19 @@ def test_external_sort_chunk_boundary_cases(tmp_path: Path) -> None:
     sort must produce ⌈10/3⌉ = 4 chunks and merge them correctly.
     """
     config = load_config(CONFIG_DIR)
-    # Build a config with a tiny chunk_size by mutating the loaded one.
-    # ResolvedConfig.runtime is frozen, so reach in via dataclasses.replace.
-    from dataclasses import replace as _replace
-
-    small_runtime = _replace(config.runtime, chunk_size=3)
-    config = _replace(config, runtime=small_runtime)
+    config = _replace(config, runtime=_replace(config.runtime, chunk_size=3))
 
     shuffled = tmp_path / "shuffled.dat"
     _shuffle_records(EXAMPLES / "sample_a.dat", shuffled, config, seed=7)
-    expected_keys = sorted(_read_records(shuffled, config))
+    expected_keys = sorted(_read_keys(shuffled, config))
 
     out = tmp_path / "sorted.dat"
-    external_sort_file(shuffled, out, config)
-    assert _read_records(out, config) == expected_keys
+    _sort_a(shuffled, out, config)
+    assert _read_keys(out, config) == expected_keys
 
 
 def test_external_sort_cleans_up_chunk_files(tmp_path: Path) -> None:
     """Temp chunk files must be deleted after the merge."""
-    from dataclasses import replace as _replace
-
     config = load_config(CONFIG_DIR)
     sort_dir = tmp_path / "sort_temp"
     config = _replace(config, runtime=_replace(config.runtime, sort_temp_dir=sort_dir))
@@ -121,7 +142,7 @@ def test_external_sort_cleans_up_chunk_files(tmp_path: Path) -> None:
     shuffled = tmp_path / "shuffled.dat"
     _shuffle_records(EXAMPLES / "sample_a.dat", shuffled, config)
     out = tmp_path / "sorted.dat"
-    external_sort_file(shuffled, out, config)
+    _sort_a(shuffled, out, config)
 
     # Sort dir may still exist (cheap mkdir) but should contain no chunk_*.dat.
     leftover = list(sort_dir.glob("chunk_*.dat")) if sort_dir.exists() else []
@@ -138,11 +159,7 @@ def test_pipeline_run_with_external_sort_on_unsorted_input_matches_sorted_baseli
 ) -> None:
     """End-to-end: shuffled inputs + external_sort=True produces the same
     classifications and per-segment counts as the sorted baseline.
-
-    Output filenames will differ because the timestamp comes from now()
-    in the baseline run and we pin run_timestamp here, so we compare
-    SUMMARY counts and the keys present in each output file, not raw
-    file bytes."""
+    """
     config = load_config(CONFIG_DIR)
 
     # Sorted-baseline run
@@ -160,7 +177,7 @@ def test_pipeline_run_with_external_sort_on_unsorted_input_matches_sorted_baseli
     shuffled_b = tmp_path / "shuffled_b.dat"
     _shuffle_records(EXAMPLES / "sample_a.dat", shuffled_a, config, seed=1)
     _shuffle_records(EXAMPLES / "sample_b.dat", shuffled_b, config, seed=2)
-    assert _read_records(shuffled_a, config) != _read_records(EXAMPLES / "sample_a.dat", config)
+    assert _read_keys(shuffled_a, config) != _read_keys(EXAMPLES / "sample_a.dat", config)
 
     sorted_out = tmp_path / "sorted_run"
     sorted_run = run(
@@ -196,14 +213,12 @@ def test_pipeline_run_with_external_sort_on_unsorted_input_matches_sorted_baseli
         ), f"{base} differs between sorted baseline and external-sorted unsorted run"
 
 
-def test_pipeline_run_with_input_sorted_false_in_config_triggers_external_sort(
+def test_pipeline_run_with_input_sorted_false_in_layout_triggers_external_sort(
     tmp_path: Path,
 ) -> None:
-    """If runtime.input_sorted is false, the sort happens even without the flag."""
-    from dataclasses import replace as _replace
-
+    """If either layout's sort.input_sorted is false, the sort happens even without the flag."""
     config = load_config(CONFIG_DIR)
-    config = _replace(config, runtime=_replace(config.runtime, input_sorted=False))
+    config = _set_input_sorted(config, False)
 
     shuffled_a = tmp_path / "shuffled_a.dat"
     shuffled_b = tmp_path / "shuffled_b.dat"
@@ -217,7 +232,7 @@ def test_pipeline_run_with_input_sorted_false_in_config_triggers_external_sort(
         config=config,
         output_dir=out,
         run_timestamp=FIXED_TS,
-        # external_sort flag NOT passed; config flag triggers the sort.
+        # external_sort flag NOT passed; layout flag triggers the sort.
     )
 
     # Counts should match the canonical sample-file oracle.
@@ -228,11 +243,7 @@ def test_pipeline_run_with_input_sorted_false_in_config_triggers_external_sort(
 def test_summary_records_original_input_paths_not_sorted_temp_paths(
     tmp_path: Path,
 ) -> None:
-    """When the sort runs, summary.json must still cite the original inputs.
-
-    The sorted intermediates live under sort_temp_dir and are an
-    implementation detail — auditors care about what was passed in.
-    """
+    """When the sort runs, summary.json must still cite the original inputs."""
     config = load_config(CONFIG_DIR)
     shuffled_a = tmp_path / "shuffled_a.dat"
     shuffled_b = tmp_path / "shuffled_b.dat"

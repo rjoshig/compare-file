@@ -36,10 +36,9 @@ Record with 4 TR01s = **467 bytes** + `\n` = 468 on the wire.
 ### Key location
 
 The 12-byte key lives at **TU4R data offset [4, 16)** — immediately
-after the literal `"DATA"` prefix. (This differs from the simple
-`examples/sample_*.dat` where the key starts at TU4R data offset 0;
-the config will need a `key_range` update before this fixture can be
-fed to the engine.)
+after the literal `"DATA"` prefix. The committed layouts derive
+this automatically from each TU4R segment's `data_prefix`
+field-length (ADR-033); there is no global `key_range` knob to set.
 
 ### Comparison-irrelevant fields
 
@@ -133,24 +132,21 @@ Output filenames are stamped with the run start time in UTC, e.g.
 
 ## How the engine is wired for this fixture
 
-The stock `config/` directory already targets this layout:
+The stock `config/` directory targets this layout via two per-file
+layout files (ADR-033):
 
-- `config/segments.json`
-  - `known_segments` includes `SH01`, `CL01`, `TR01` along with
-    `TU4R`, `NM01`, `SC01`, `ENDS` and the other reserved entries.
-  - TU4R `key_range = [4, 16]` (the key starts after the literal
-    4-byte `"DATA"` prefix in the TU4R data area).
-- `config/normalization.json` excludes the two comparison-irrelevant
-  fields:
-  - `ENDS`: data bytes `[0, 3)` (the 3-byte segment count).
-  - `CL01`: data bytes `[11, 19)` (the 8-byte `YYYYMMDD` timestamp).
+- `config/layout_file_A.json` and `config/layout_file_B.json` declare
+  the same segments (TU4R, SH01, NM01, TR01, SC01, CL01, ENDS) with
+  the same per-segment field layouts. TU4R's `account_nbr` field is
+  marked `key: true` and sits after the 4-byte `"DATA"` prefix, so
+  the engine derives `key_range = [4, 16)` per file automatically.
+- The two comparison-irrelevant fields are flagged inline:
+  - `ENDS.segment_count` (3 bytes): `exclude: true`.
+  - `CL01.opened_date` (8 bytes, `YYYYMMDD`): `exclude: true`.
 - The parser handles `ENDS` with non-zero data without special-casing —
   it reads size from the header and treats `ENDS` as a terminator
   regardless of payload. Covered by
   `tests/test_parser.py::test_ends_with_non_zero_data_payload_is_parsed_correctly`.
-
-These config changes are tracked separately — see the next session log
-entry once they land.
 
 ---
 

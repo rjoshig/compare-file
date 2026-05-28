@@ -138,8 +138,12 @@ python -m segment_compare \
 
 #### `--config-dir` (required)
 
-Directory containing `segments.json`, `normalization.json`, and
-`runtime.json`. Validated at startup; bad config exits 10.
+Directory containing `layout_file_A.json`, `layout_file_B.json`, and
+`runtime.json` (ADR-033). Each layout describes one input file's
+byte format, optional RDW / leading-byte strip, sort metadata, and
+the ordered list of segments with per-field `name` / `length` /
+`exclude` / `key` declarations. Validated at startup; bad config
+exits 10.
 
 ```bash
 # Stock config
@@ -183,9 +187,10 @@ correctness drift.
 #### `--external-sort`
 
 Force a chunk-and-merge sort of both inputs before the
-comparison. By default the engine trusts `runtime.json::input_sorted`
-(stock: `true`). Pass this flag when input sort order is unknown
-or you've just received unsorted output from an upstream system.
+comparison. By default the engine trusts each layout's
+`sort.input_sorted` (stock: `true` on both sides) and sorts only
+the side(s) declared unsorted. Pass this flag to force the sort on
+both sides regardless.
 
 ```bash
 # Inputs may not be sorted by key
@@ -199,8 +204,9 @@ Sorted intermediates land in `runtime.json::sort_temp_dir`
 `sorted_b_<stamp>.dat`. The `summary.json` records the original
 input paths, not these temp files (ADR-030).
 
-Alternatively, flip `runtime.json::input_sorted` to `false`
-permanently and the engine will sort on every run without a flag.
+Alternatively, flip `sort.input_sorted` to `false` in either layout
+file permanently and the engine will sort that side on every run
+without a flag.
 
 #### `--dry-run`
 
@@ -226,9 +232,9 @@ argparse but is never touched.
 
 #### `--validate-config`
 
-Load and validate the three config files without touching the
-inputs. Useful in CI / deploy pipelines to catch config drift
-before scheduling a real run.
+Load and validate `layout_file_A.json`, `layout_file_B.json`, and
+`runtime.json` without touching the inputs. Useful in CI / deploy
+pipelines to catch layout drift before scheduling a real run.
 
 ```bash
 python -m segment_compare --validate-config --config-dir config/
@@ -344,10 +350,9 @@ compare-file/
 ├── .gitignore
 ├── .python-version                        # pyenv pin (3.12.7)
 ├── config/
-│   ├── segments.json                      # segment catalog + parser knobs
-│   ├── normalization.json                 # per-segment strip/exclude rules
-│   ├── runtime.json                       # hash method, workers, sort settings
-│   └── segments.example-rdw.json          # example: per-file RDW prefix schema
+│   ├── layout_file_A.json                 # File A: format + segments + fields + RDW + sort (ADR-033)
+│   ├── layout_file_B.json                 # File B: same shape as A; differs where the inputs differ
+│   └── runtime.json                       # hash method, workers, chunk size, sort temp dir
 ├── docs/
 │   ├── architecture.md
 │   ├── decisions.md                       # ADRs (append-only)
@@ -422,8 +427,7 @@ mkdir -p config docs/benchmarks src/segment_compare/api tests examples ui
 touch CLAUDE.md README.md pyproject.toml .flake8 .gitignore .python-version
 
 # config/
-touch config/segments.json config/normalization.json config/runtime.json \
-      config/segments.example-rdw.json
+touch config/layout_file_A.json config/layout_file_B.json config/runtime.json
 
 # docs/
 touch docs/architecture.md docs/decisions.md docs/how-it-works.md \
@@ -468,8 +472,7 @@ $files = @(
     'CLAUDE.md','README.md','pyproject.toml','.flake8','.gitignore','.python-version',
 
     # config/
-    'config/segments.json','config/normalization.json','config/runtime.json',
-    'config/segments.example-rdw.json',
+    'config/layout_file_A.json','config/layout_file_B.json','config/runtime.json',
 
     # docs/
     'docs/architecture.md','docs/decisions.md','docs/how-it-works.md',

@@ -112,7 +112,8 @@ Requires a sorted key list, which we already need for the inner-join.
 
 ## ADR-007 — Position-based normalization in Phase 1, field-based in Phase 2
 
-**Status:** accepted
+**Status:** superseded by ADR-033 (position-based form removed; the
+per-file layout schema is the only form going forward)
 
 **Context:** Real-world layout differences are easier to express as named
 fields, but a position-based config gets us comparing data sooner.
@@ -129,7 +130,9 @@ without breaking existing configs.
 
 ## ADR-008 — Per-segment normalization rules separate for File A and File B
 
-**Status:** accepted
+**Status:** superseded by ADR-033 (per-file rules now live as
+``segments[]`` blocks inside each ``layout_file_*.json``; the
+normalization.json file is gone)
 
 **Context:** A and B may come from different systems with different
 layouts for the "same" segment.
@@ -585,7 +588,9 @@ CLI surface:
 
 ## ADR-029 — Field-based normalization: canonical form, dispatch, single-form-per-segment
 
-**Status:** accepted
+**Status:** superseded by ADR-033 on dispatch (position-form is gone;
+the canonical-form bytes contract — sorted ``name=value`` joined by
+``\x1F`` — is unchanged)
 
 **Context:** Phase 2 introduces `FieldNormalizer` alongside the
 existing `PositionNormalizer`. The two forms address different
@@ -731,7 +736,10 @@ points:
 
 ## ADR-031 — Per-file Record Descriptor Word (RDW) prefix is configurable, not parsed
 
-**Status:** accepted
+**Status:** accepted (per-file ``rdw`` block now lives inside each
+``layout_file_*.json`` rather than as a sibling under
+``segments.json::parser`` — see ADR-033; the on-wire contract is
+unchanged)
 
 **Context:** Real-world inputs sometimes prepend a small fixed prefix to
 every record before the key segment. Mainframe extracts are the most

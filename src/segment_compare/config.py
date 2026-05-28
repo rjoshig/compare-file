@@ -1,14 +1,21 @@
-"""Configuration loading and validation.
+"""Engine config: two per-file layouts + run-wide runtime knobs.
 
-Reads the three JSON config files in ``config_dir`` (``segments.json``,
-``normalization.json``, ``runtime.json``), validates every field, and
-returns an immutable :class:`ResolvedConfig` plus an audit hash so that
+Reads three JSON files from ``config_dir`` — ``layout_file_A.json``,
+``layout_file_B.json``, and ``runtime.json`` — and assembles a
+fully-validated :class:`EngineConfig` plus an audit hash so
 ``summary.json`` can prove which config produced a given run
-(ADR-017).
+(ADR-017, ADR-033).
 
-Phase 1 honors only a restricted set of values for the forward-
-compatible parser knobs and runtime knobs (ADR-016). Anything else
-raises :class:`ConfigError` at load time rather than at first use.
+Each layout file is validated by
+:func:`segment_compare.layout.load_file_layout`; this module then
+synthesizes the engine-facing views (per-file :class:`ParserConfig`,
+:class:`SegmentsConfig`, RDW, leading-byte strip) and the per-segment
+:class:`FieldNormalizationRule` mapping that the comparator consumes.
+
+The position-based normalization form is gone (ADR-007/008/029
+superseded by ADR-033). Every segment that appears in both layouts gets
+a field-based rule; segments only in one side fall through unchanged
+and surface as count differences in the multiset comparator.
 """
 
 from __future__ import annotations
@@ -19,22 +26,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from segment_compare.layout import FileLayout, LayoutError, load_file_layout
+from segment_compare.normalizer import FieldDef, FieldNormalizationRule
 from segment_compare.parser import ParserConfig, RdwConfig, SegmentsConfig
 
-SEGMENTS_FILE = "segments.json"
-NORMALIZATION_FILE = "normalization.json"
+LAYOUT_A_FILE = "layout_file_A.json"
+LAYOUT_B_FILE = "layout_file_B.json"
 RUNTIME_FILE = "runtime.json"
 
 SUPPORTED_HASH_METHODS = ("blake2b", "builtin")
 SUPPORTED_PARTITION_STRATEGIES = ("equal_count",)
-SUPPORTED_KEY_TYPES = ("alphanumeric", "numeric")
-SUPPORTED_KEY_SORT_ORDERS = ("ascending", "descending")
-SUPPORTED_SIZE_ENCODINGS_PHASE1 = ("ascii_int",)
-SUPPORTED_DATA_ENCODINGS_PHASE1 = ("ascii",)
-SUPPORTED_RDW_ENCODINGS = ("ascii_int", "binary_le_uint")
-
-DEFAULT_SEGMENT_NAME_BYTES = 4
-DEFAULT_SIZE_FIELD_BYTES = 3
 
 MIN_BLAKE2B_DIGEST = 1
 MAX_BLAKE2B_DIGEST = 64
@@ -45,7 +46,7 @@ class ConfigError(Exception):
 
     Attributes:
         field: Path-like identifier of the offending field (e.g.,
-            ``"segments.json::key_range"``).
+            ``"runtime.json::parallel_workers"``).
         message: Human-readable description of the problem.
     """
 
@@ -59,172 +60,161 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
-class NormalizationRule:
-    """Per-segment normalization rule (Phase 1 position-based form).
-
-    Attributes:
-        file_a_strip: Byte ranges to remove from File A's segment data
-            before alignment, as ``(start, end)`` end-exclusive pairs.
-        file_b_strip: Same as ``file_a_strip``, applied to File B.
-        exclude_positions: Byte ranges to remove from both files'
-            post-strip data before hashing.
-    """
-
-    file_a_strip: tuple[tuple[int, int], ...]
-    file_b_strip: tuple[tuple[int, int], ...]
-    exclude_positions: tuple[tuple[int, int], ...]
-
-
-@dataclass(frozen=True, slots=True)
-class FieldDef:
-    """One field's definition within a segment's per-file layout.
-
-    Attributes:
-        name: Logical field name (e.g., ``"first_name"``). Used as the
-            key in the canonical ``name=value`` representation, so it
-            must match across File A and File B for fields the engine
-            should compare. ASCII only.
-        length: Length in bytes that this field occupies in the
-            segment's raw data area. Must be > 0.
-        exclude: If true, the field is dropped before hashing so its
-            content does not influence the match/mismatch verdict.
-            Useful for timestamps, filler bytes, or system-specific
-            metadata that differs across A and B but is not part of
-            the comparable data.
-    """
-
-    name: str
-    length: int
-    exclude: bool
-
-
-@dataclass(frozen=True, slots=True)
-class FieldNormalizationRule:
-    """Per-segment field-based normalization rule (Phase 2 form).
-
-    The two layouts can differ in field order, field lengths, or even
-    field counts (one side may carry trailing filler that the other
-    does not). After excludes are applied and retained fields are
-    keyed by ``name``, the segments compare equal iff the retained
-    name-value sets agree (see :class:`FieldNormalizer`).
-
-    Attributes:
-        file_a_layout: Fields slicing File A's segment data, in
-            byte order. Sum of lengths must equal the segment's
-            on-wire data length at runtime; mismatch raises a
-            ``ValueError`` from the normalizer.
-        file_b_layout: Same for File B.
-    """
-
-    file_a_layout: tuple[FieldDef, ...]
-    file_b_layout: tuple[FieldDef, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeConfig:
-    """Runtime knobs from ``runtime.json``.
+    """Run-wide knobs from ``runtime.json``.
 
-    Phase 1 honors all fields but only single-process behavior. Phase 2
-    introduces parallelism that consumes ``parallel_workers`` and
-    ``partition_strategy``.
+    Per-file sort metadata (``input_sorted``, ``order``, ``key_type``)
+    lives on each layout's ``sort`` block now (ADR-033) — not here.
+
+    Attributes:
+        hash_method: ``"blake2b"`` or ``"builtin"``.
+        blake2b_digest_size: Bytes of digest produced by blake2b.
+            Ignored when ``hash_method == "builtin"``.
+        sort_temp_dir: Spill directory for the external chunk-and-merge
+            sort.
+        parallel_workers: Default worker process count when the CLI
+            does not pass ``--workers`` (ADR-028).
+        chunk_size: Records buffered per external-sort chunk.
+        partition_strategy: Worker partition scheme. ``"equal_count"``
+            is the only supported value today.
     """
 
     hash_method: str
     blake2b_digest_size: int
-    input_sorted: bool
     sort_temp_dir: Path
     parallel_workers: int
     chunk_size: int
     partition_strategy: str
-    key_type: str
-    key_sort_order: str
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedConfig:
-    """All three configs validated and assembled for engine consumption.
+class EngineConfig:
+    """Validated engine config: two layouts plus run-wide runtime knobs.
+
+    Provides ``parser_*`` / ``segments_*`` / ``file_*_rdw`` /
+    ``file_*_strip_size`` accessors so engine modules can ask for the
+    legacy-shaped per-file views without reaching into the layout
+    objects.
 
     Attributes:
-        parser: Parser knobs (see :class:`ParserConfig`).
-        segments: Record-framing config (see :class:`SegmentsConfig`).
-        known_segments: All segment names the parser may encounter.
-        normalization: Per-segment normalization rules keyed by segment
-            name. Segments not present in this mapping have no
-            normalization applied.
-        runtime: Runtime knobs (see :class:`RuntimeConfig`).
-        audit_hash: SHA-256 hex of the canonicalized merged config
-            bundle (``$comment`` keys stripped, all keys sorted).
-        paths: Mapping of config-file kind to its source ``Path``, for
-            inclusion in ``summary.json``.
+        layout_a: Validated layout for File A.
+        layout_b: Validated layout for File B.
+        runtime: Run-wide runtime knobs.
+        normalization: ``segment_name -> FieldNormalizationRule`` built
+            from the two layouts at load time. A segment is in this
+            map iff it appears in both layouts.
+        audit_hash: SHA-256 hex of the canonicalized bundle of the
+            three source JSON documents (``$comment`` keys stripped).
+        paths: ``kind -> Path`` mapping of source files for inclusion
+            in ``summary.json``.
     """
 
-    parser: ParserConfig
-    segments: SegmentsConfig
-    known_segments: tuple[str, ...]
-    file_a_rdw: RdwConfig | None = None
-    file_b_rdw: RdwConfig | None = None
-    normalization: dict[str, NormalizationRule] = field(default_factory=dict)
-    field_normalization: dict[str, FieldNormalizationRule] = field(default_factory=dict)
-    runtime: RuntimeConfig = field(
-        default_factory=lambda: RuntimeConfig(
-            hash_method="blake2b",
-            blake2b_digest_size=16,
-            input_sorted=True,
-            sort_temp_dir=Path("/tmp/segment_compare"),
-            parallel_workers=1,
-            chunk_size=10000,
-            partition_strategy="equal_count",
-            key_type="alphanumeric",
-            key_sort_order="ascending",
-        )
-    )
+    layout_a: FileLayout
+    layout_b: FileLayout
+    runtime: RuntimeConfig
+    normalization: dict[str, FieldNormalizationRule] = field(default_factory=dict)
     audit_hash: str = ""
     paths: dict[str, Path] = field(default_factory=dict)
 
+    @property
+    def parser_a(self) -> ParserConfig:
+        """Engine-facing :class:`ParserConfig` derived from File A's layout."""
+        return _file_format_to_parser(self.layout_a)
 
-def load_config(config_dir: Path) -> ResolvedConfig:
-    """Load and validate the three JSON configs from ``config_dir``.
+    @property
+    def parser_b(self) -> ParserConfig:
+        """Engine-facing :class:`ParserConfig` derived from File B's layout."""
+        return _file_format_to_parser(self.layout_b)
+
+    @property
+    def segments_a(self) -> SegmentsConfig:
+        """:class:`SegmentsConfig` for File A (per-file key_range)."""
+        return _layout_to_segments(self.layout_a)
+
+    @property
+    def segments_b(self) -> SegmentsConfig:
+        """:class:`SegmentsConfig` for File B (per-file key_range)."""
+        return _layout_to_segments(self.layout_b)
+
+    @property
+    def file_a_rdw(self) -> RdwConfig | None:
+        """File A's optional RDW prefix, or ``None``."""
+        return self.layout_a.rdw
+
+    @property
+    def file_b_rdw(self) -> RdwConfig | None:
+        """File B's optional RDW prefix, or ``None``."""
+        return self.layout_b.rdw
+
+    @property
+    def file_a_strip_size(self) -> int:
+        """File A's per-record leading-byte strip, or 0 if absent."""
+        return self.layout_a.strip_leading_bytes.size if self.layout_a.strip_leading_bytes else 0
+
+    @property
+    def file_b_strip_size(self) -> int:
+        """File B's per-record leading-byte strip, or 0 if absent."""
+        return self.layout_b.strip_leading_bytes.size if self.layout_b.strip_leading_bytes else 0
+
+    @property
+    def known_segments(self) -> tuple[str, ...]:
+        """Union of segment names across both layouts, in stable order.
+
+        File A's order first; B's extras appended in B's declaration
+        order. Used by the writer to emit a stable
+        ``per_segment`` block in ``summary.json``.
+        """
+        seen: dict[str, None] = {}
+        for seg in self.layout_a.segments:
+            seen.setdefault(seg.name, None)
+        for seg in self.layout_b.segments:
+            seen.setdefault(seg.name, None)
+        return tuple(seen)
+
+
+def load_config(config_dir: Path) -> EngineConfig:
+    """Load and validate the three JSON files in ``config_dir``.
 
     Args:
-        config_dir: Directory containing ``segments.json``,
-            ``normalization.json``, and ``runtime.json``.
+        config_dir: Directory containing ``layout_file_A.json``,
+            ``layout_file_B.json``, and ``runtime.json``.
 
     Returns:
-        A :class:`ResolvedConfig` with every field validated.
+        A fully validated :class:`EngineConfig`.
 
     Raises:
-        ConfigError: If any file is missing, malformed, or invalid.
+        ConfigError: If any file is missing, malformed, or invalid, or
+            if a layout file fails its own load-time invariants. Errors
+            from :class:`LayoutError` are re-raised as ``ConfigError``
+            so the CLI can map them to a single exit code.
     """
-    seg_path = config_dir / SEGMENTS_FILE
-    norm_path = config_dir / NORMALIZATION_FILE
-    rt_path = config_dir / RUNTIME_FILE
+    layout_a_path = config_dir / LAYOUT_A_FILE
+    layout_b_path = config_dir / LAYOUT_B_FILE
+    runtime_path = config_dir / RUNTIME_FILE
 
-    seg_raw = _read_json(seg_path)
-    norm_raw = _read_json(norm_path)
-    rt_raw = _read_json(rt_path)
+    try:
+        layout_a = load_file_layout(layout_a_path)
+        layout_b = load_file_layout(layout_b_path)
+    except LayoutError as exc:
+        raise ConfigError(exc.field, exc.message) from exc
 
-    parser_cfg = _build_parser_config(seg_raw, seg_path)
-    file_a_rdw, file_b_rdw = _build_rdw_configs(seg_raw, seg_path)
-    known_segments, segments_cfg = _build_segments_config(seg_raw, seg_path)
-    normalization, field_normalization = _build_normalization(norm_raw, known_segments, norm_path)
-    runtime_cfg = _build_runtime_config(rt_raw, rt_path)
+    runtime_raw = _read_json(runtime_path)
+    runtime_cfg = _build_runtime_config(runtime_raw, runtime_path)
 
-    audit_hash = _compute_audit_hash(seg_raw, norm_raw, rt_raw)
+    normalization = _build_normalization(layout_a, layout_b)
 
-    return ResolvedConfig(
-        parser=parser_cfg,
-        segments=segments_cfg,
-        known_segments=known_segments,
-        file_a_rdw=file_a_rdw,
-        file_b_rdw=file_b_rdw,
-        normalization=normalization,
-        field_normalization=field_normalization,
+    audit_hash = _compute_audit_hash(layout_a_path, layout_b_path, runtime_raw)
+
+    return EngineConfig(
+        layout_a=layout_a,
+        layout_b=layout_b,
         runtime=runtime_cfg,
+        normalization=normalization,
         audit_hash=audit_hash,
         paths={
-            "segments": seg_path,
-            "normalization": norm_path,
-            "runtime": rt_path,
+            "layout_a": layout_a_path,
+            "layout_b": layout_b_path,
+            "runtime": runtime_path,
         },
     )
 
@@ -232,6 +222,54 @@ def load_config(config_dir: Path) -> ResolvedConfig:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _file_format_to_parser(layout: FileLayout) -> ParserConfig:
+    ff = layout.file_format
+    return ParserConfig(
+        segment_name_bytes=ff.segment_name_bytes,
+        size_field_bytes=ff.size_field_bytes,
+        size_encoding=ff.size_encoding,
+        size_includes_header=ff.size_includes_header,
+        data_encoding=ff.data_encoding,
+    )
+
+
+def _layout_to_segments(layout: FileLayout) -> SegmentsConfig:
+    return SegmentsConfig(
+        key_segment=layout.key_segment.name,
+        end_segment=layout.end_segment.name,
+        key_range=layout.key_range,
+        record_delimiter=layout.file_format.record_delimiter,
+    )
+
+
+def _build_normalization(
+    layout_a: FileLayout, layout_b: FileLayout
+) -> dict[str, FieldNormalizationRule]:
+    """Pair per-segment layouts from A and B into the normalizer's rule map.
+
+    A segment appears in the rule map iff its name is declared in
+    *both* layouts. Segments only in one side fall through the
+    normalizer unchanged and surface as count differences in the
+    multiset comparator.
+    """
+    a_segs = {seg.name: seg for seg in layout_a.segments}
+    b_segs = {seg.name: seg for seg in layout_b.segments}
+    out: dict[str, FieldNormalizationRule] = {}
+    for name in a_segs:
+        if name in b_segs:
+            out[name] = FieldNormalizationRule(
+                file_a_layout=tuple(
+                    FieldDef(name=f.name, length=f.length, exclude=f.exclude)
+                    for f in a_segs[name].fields
+                ),
+                file_b_layout=tuple(
+                    FieldDef(name=f.name, length=f.length, exclude=f.exclude)
+                    for f in b_segs[name].fields
+                ),
+            )
+    return out
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -265,344 +303,9 @@ def _require_type(value: Any, expected: type, path: Path, field_path: str) -> An
     return value
 
 
-def _build_parser_config(seg_raw: dict[str, Any], seg_path: Path) -> ParserConfig:
-    parser_in = seg_raw.get("parser", {})
-    _require_type(parser_in, dict, seg_path, "parser")
-
-    snb = parser_in.get("segment_name_bytes", DEFAULT_SEGMENT_NAME_BYTES)
-    sfb = parser_in.get("size_field_bytes", DEFAULT_SIZE_FIELD_BYTES)
-    enc = parser_in.get("size_encoding", "ascii_int")
-    inc = parser_in.get("size_includes_header", True)
-    data_enc = parser_in.get("data_encoding", "ascii")
-
-    if snb != DEFAULT_SEGMENT_NAME_BYTES:
-        raise ConfigError(
-            f"{seg_path.name}::parser.segment_name_bytes",
-            f"Phase 1 supports only {DEFAULT_SEGMENT_NAME_BYTES}, got {snb!r}",
-        )
-    if sfb != DEFAULT_SIZE_FIELD_BYTES:
-        raise ConfigError(
-            f"{seg_path.name}::parser.size_field_bytes",
-            f"Phase 1 supports only {DEFAULT_SIZE_FIELD_BYTES}, got {sfb!r}",
-        )
-    if enc not in SUPPORTED_SIZE_ENCODINGS_PHASE1:
-        raise ConfigError(
-            f"{seg_path.name}::parser.size_encoding",
-            f"Phase 1 supports only {list(SUPPORTED_SIZE_ENCODINGS_PHASE1)}, got {enc!r}",
-        )
-    if inc is not True:
-        raise ConfigError(
-            f"{seg_path.name}::parser.size_includes_header",
-            f"Phase 1 supports only True, got {inc!r}",
-        )
-    if data_enc not in SUPPORTED_DATA_ENCODINGS_PHASE1:
-        raise ConfigError(
-            f"{seg_path.name}::parser.data_encoding",
-            f"Phase 1 supports only {list(SUPPORTED_DATA_ENCODINGS_PHASE1)}, got {data_enc!r}",
-        )
-
-    return ParserConfig(
-        segment_name_bytes=snb,
-        size_field_bytes=sfb,
-        size_encoding=enc,
-        size_includes_header=inc,
-        data_encoding=data_enc,
-    )
-
-
-def _build_rdw_configs(
-    seg_raw: dict[str, Any], seg_path: Path
-) -> tuple[RdwConfig | None, RdwConfig | None]:
-    """Parse optional per-file RDW prefix blocks from ``parser.file_a`` / ``parser.file_b``.
-
-    Either or both blocks may be absent. When present, the ``rdw``
-    sub-object must declare positive ``rdw1_bytes`` and ``rdw2_bytes``
-    and an encoding from :data:`SUPPORTED_RDW_ENCODINGS`.
-    """
-    parser_in = seg_raw.get("parser", {})
-    return (
-        _build_rdw_for_file(parser_in, "file_a", seg_path),
-        _build_rdw_for_file(parser_in, "file_b", seg_path),
-    )
-
-
-def _build_rdw_for_file(
-    parser_in: dict[str, Any], file_key: str, seg_path: Path
-) -> RdwConfig | None:
-    file_block = parser_in.get(file_key)
-    if file_block is None:
-        return None
-    _require_type(file_block, dict, seg_path, f"parser.{file_key}")
-    rdw_raw = file_block.get("rdw")
-    if rdw_raw is None:
-        return None
-    _require_type(rdw_raw, dict, seg_path, f"parser.{file_key}.rdw")
-
-    field_path = f"parser.{file_key}.rdw"
-    rdw1 = _require_field(rdw_raw, "rdw1_bytes", seg_path)
-    rdw2 = _require_field(rdw_raw, "rdw2_bytes", seg_path)
-    encoding = _require_field(rdw_raw, "encoding", seg_path)
-    _require_type(rdw1, int, seg_path, f"{field_path}.rdw1_bytes")
-    _require_type(rdw2, int, seg_path, f"{field_path}.rdw2_bytes")
-    _require_type(encoding, str, seg_path, f"{field_path}.encoding")
-    if rdw1 <= 0:
-        raise ConfigError(
-            f"{seg_path.name}::{field_path}.rdw1_bytes",
-            f"must be > 0, got {rdw1}",
-        )
-    if rdw2 <= 0:
-        raise ConfigError(
-            f"{seg_path.name}::{field_path}.rdw2_bytes",
-            f"must be > 0, got {rdw2}",
-        )
-    if encoding not in SUPPORTED_RDW_ENCODINGS:
-        raise ConfigError(
-            f"{seg_path.name}::{field_path}.encoding",
-            f"must be one of {list(SUPPORTED_RDW_ENCODINGS)}, got {encoding!r}",
-        )
-    return RdwConfig(rdw1_bytes=rdw1, rdw2_bytes=rdw2, encoding=encoding)
-
-
-def _build_segments_config(
-    seg_raw: dict[str, Any], seg_path: Path
-) -> tuple[tuple[str, ...], SegmentsConfig]:
-    known_raw = _require_type(
-        _require_field(seg_raw, "known_segments", seg_path),
-        list,
-        seg_path,
-        "known_segments",
-    )
-    if not known_raw:
-        raise ConfigError(f"{seg_path.name}::known_segments", "must not be empty")
-    for i, name in enumerate(known_raw):
-        if not isinstance(name, str) or not name:
-            raise ConfigError(
-                f"{seg_path.name}::known_segments[{i}]",
-                "entries must be non-empty strings",
-            )
-    if len(set(known_raw)) != len(known_raw):
-        raise ConfigError(f"{seg_path.name}::known_segments", "entries must be unique")
-    known_segments = tuple(known_raw)
-
-    key_segment = _require_type(
-        _require_field(seg_raw, "key_segment", seg_path), str, seg_path, "key_segment"
-    )
-    end_segment = _require_type(
-        _require_field(seg_raw, "end_segment", seg_path), str, seg_path, "end_segment"
-    )
-    if key_segment not in known_segments:
-        raise ConfigError(
-            f"{seg_path.name}::key_segment",
-            f"{key_segment!r} not in known_segments",
-        )
-    if end_segment not in known_segments:
-        raise ConfigError(
-            f"{seg_path.name}::end_segment",
-            f"{end_segment!r} not in known_segments",
-        )
-    if key_segment == end_segment:
-        raise ConfigError(
-            f"{seg_path.name}::end_segment",
-            "must differ from key_segment",
-        )
-
-    key_range_raw = _require_field(seg_raw, "key_range", seg_path)
-    if (
-        not isinstance(key_range_raw, list)
-        or len(key_range_raw) != 2
-        or not all(isinstance(v, int) for v in key_range_raw)
-    ):
-        raise ConfigError(
-            f"{seg_path.name}::key_range",
-            "must be a list of two integers [start, end]",
-        )
-    start, end = key_range_raw
-    if start < 0 or end <= start:
-        raise ConfigError(
-            f"{seg_path.name}::key_range",
-            f"invalid range [{start}, {end}); require 0 <= start < end",
-        )
-
-    delim_raw = _require_type(
-        _require_field(seg_raw, "record_delimiter", seg_path),
-        str,
-        seg_path,
-        "record_delimiter",
-    )
-    try:
-        delim_bytes = delim_raw.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise ConfigError(
-            f"{seg_path.name}::record_delimiter",
-            f"must be ASCII-encodable, got {delim_raw!r}",
-        ) from exc
-
-    segments_cfg = SegmentsConfig(
-        key_segment=key_segment,
-        end_segment=end_segment,
-        key_range=(start, end),
-        record_delimiter=delim_bytes,
-    )
-    return known_segments, segments_cfg
-
-
-_POSITION_FORM_KEYS = frozenset({"file_a_strip", "file_b_strip", "exclude_positions"})
-_FIELD_FORM_KEYS = frozenset({"file_a_layout", "file_b_layout"})
-
-
-def _build_normalization(
-    norm_raw: dict[str, Any],
-    known_segments: tuple[str, ...],
-    norm_path: Path,
-) -> tuple[dict[str, NormalizationRule], dict[str, FieldNormalizationRule]]:
-    """Dispatch each entry to position-based or field-based rule builder.
-
-    Returns two maps keyed by segment name. A segment appears in
-    exactly one of them — mixed-form entries (both position-form keys
-    and field-form keys in the same JSON object) are rejected at load
-    time per ADR-029.
-    """
-    position_rules: dict[str, NormalizationRule] = {}
-    field_rules: dict[str, FieldNormalizationRule] = {}
-    known = set(known_segments)
-    for name, rule_raw in norm_raw.items():
-        if name.startswith("$"):
-            continue
-        if name not in known:
-            raise ConfigError(
-                f"{norm_path.name}::{name}",
-                "segment is not in segments.json::known_segments",
-            )
-        _require_type(rule_raw, dict, norm_path, name)
-
-        keys = {k for k in rule_raw if not k.startswith("$")}
-        has_position = bool(keys & _POSITION_FORM_KEYS)
-        has_field = bool(keys & _FIELD_FORM_KEYS)
-        if has_position and has_field:
-            raise ConfigError(
-                f"{norm_path.name}::{name}",
-                "cannot mix position-based keys "
-                f"({sorted(keys & _POSITION_FORM_KEYS)}) and field-based keys "
-                f"({sorted(keys & _FIELD_FORM_KEYS)}) in the same entry",
-            )
-
-        if has_field:
-            field_rules[name] = _parse_field_rule(rule_raw, name, norm_path)
-        else:
-            position_rules[name] = NormalizationRule(
-                file_a_strip=_parse_ranges(
-                    rule_raw.get("file_a_strip", []), norm_path, f"{name}.file_a_strip"
-                ),
-                file_b_strip=_parse_ranges(
-                    rule_raw.get("file_b_strip", []), norm_path, f"{name}.file_b_strip"
-                ),
-                exclude_positions=_parse_ranges(
-                    rule_raw.get("exclude_positions", []),
-                    norm_path,
-                    f"{name}.exclude_positions",
-                ),
-            )
-    return position_rules, field_rules
-
-
-def _parse_field_rule(
-    rule_raw: dict[str, Any], segment_name: str, norm_path: Path
-) -> FieldNormalizationRule:
-    """Build a :class:`FieldNormalizationRule` from one JSON entry.
-
-    Both ``file_a_layout`` and ``file_b_layout`` must be present and
-    non-empty. Each layout is a list of objects ``{"name", "length",
-    "exclude"}``. Field names within a layout must be unique.
-    """
-    a_raw = _require_field(rule_raw, "file_a_layout", norm_path)
-    b_raw = _require_field(rule_raw, "file_b_layout", norm_path)
-    return FieldNormalizationRule(
-        file_a_layout=_parse_field_layout(a_raw, norm_path, f"{segment_name}.file_a_layout"),
-        file_b_layout=_parse_field_layout(b_raw, norm_path, f"{segment_name}.file_b_layout"),
-    )
-
-
-def _parse_field_layout(raw: Any, norm_path: Path, field_path: str) -> tuple[FieldDef, ...]:
-    """Validate one side of a field rule and return the parsed layout."""
-    if not isinstance(raw, list):
-        raise ConfigError(
-            f"{norm_path.name}::{field_path}",
-            f"must be a list of field objects, got {type(raw).__name__}",
-        )
-    if not raw:
-        raise ConfigError(
-            f"{norm_path.name}::{field_path}",
-            "must declare at least one field",
-        )
-    seen_names: set[str] = set()
-    out: list[FieldDef] = []
-    for i, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise ConfigError(
-                f"{norm_path.name}::{field_path}[{i}]",
-                f"must be an object with name/length/exclude, got {type(item).__name__}",
-            )
-        name = item.get("name")
-        length = item.get("length")
-        exclude = item.get("exclude", False)
-        if not isinstance(name, str) or not name:
-            raise ConfigError(
-                f"{norm_path.name}::{field_path}[{i}].name",
-                "must be a non-empty string",
-            )
-        if not isinstance(length, int) or length <= 0:
-            raise ConfigError(
-                f"{norm_path.name}::{field_path}[{i}].length",
-                f"must be a positive int, got {length!r}",
-            )
-        if not isinstance(exclude, bool):
-            raise ConfigError(
-                f"{norm_path.name}::{field_path}[{i}].exclude",
-                f"must be true/false, got {type(exclude).__name__}",
-            )
-        if name in seen_names:
-            raise ConfigError(
-                f"{norm_path.name}::{field_path}[{i}].name",
-                f"duplicate field name {name!r} in this layout",
-            )
-        seen_names.add(name)
-        out.append(FieldDef(name=name, length=length, exclude=exclude))
-    return tuple(out)
-
-
-def _parse_ranges(raw: Any, path: Path, field_path: str) -> tuple[tuple[int, int], ...]:
-    if not isinstance(raw, list):
-        raise ConfigError(
-            f"{path.name}::{field_path}",
-            f"must be a list of [start, end] pairs, got {type(raw).__name__}",
-        )
-    out: list[tuple[int, int]] = []
-    for i, item in enumerate(raw):
-        if (
-            not isinstance(item, list)
-            or len(item) != 2
-            or not all(isinstance(v, int) for v in item)
-        ):
-            raise ConfigError(
-                f"{path.name}::{field_path}[{i}]",
-                "must be a list of two integers [start, end]",
-            )
-        start, end = item
-        if start < 0 or end < start:
-            raise ConfigError(
-                f"{path.name}::{field_path}[{i}]",
-                f"invalid range [{start}, {end}); require 0 <= start <= end",
-            )
-        out.append((start, end))
-    return tuple(out)
-
-
 def _build_runtime_config(rt_raw: dict[str, Any], rt_path: Path) -> RuntimeConfig:
     hash_method = _require_type(
-        _require_field(rt_raw, "hash_method", rt_path),
-        str,
-        rt_path,
-        "hash_method",
+        _require_field(rt_raw, "hash_method", rt_path), str, rt_path, "hash_method"
     )
     if hash_method not in SUPPORTED_HASH_METHODS:
         raise ConfigError(
@@ -622,27 +325,14 @@ def _build_runtime_config(rt_raw: dict[str, Any], rt_path: Path) -> RuntimeConfi
             f"must be in [{MIN_BLAKE2B_DIGEST}, {MAX_BLAKE2B_DIGEST}], got {digest_size}",
         )
 
-    input_sorted = _require_type(
-        _require_field(rt_raw, "input_sorted", rt_path),
-        bool,
-        rt_path,
-        "input_sorted",
-    )
-
     sort_temp_dir = Path(
         _require_type(
-            _require_field(rt_raw, "sort_temp_dir", rt_path),
-            str,
-            rt_path,
-            "sort_temp_dir",
+            _require_field(rt_raw, "sort_temp_dir", rt_path), str, rt_path, "sort_temp_dir"
         )
     )
 
     parallel_workers = _require_type(
-        _require_field(rt_raw, "parallel_workers", rt_path),
-        int,
-        rt_path,
-        "parallel_workers",
+        _require_field(rt_raw, "parallel_workers", rt_path), int, rt_path, "parallel_workers"
     )
     if parallel_workers < 1:
         raise ConfigError(
@@ -665,38 +355,17 @@ def _build_runtime_config(rt_raw: dict[str, Any], rt_path: Path) -> RuntimeConfi
     if partition_strategy not in SUPPORTED_PARTITION_STRATEGIES:
         raise ConfigError(
             f"{rt_path.name}::partition_strategy",
-            f"must be one of {list(SUPPORTED_PARTITION_STRATEGIES)}, got {partition_strategy!r}",
-        )
-
-    key_type = _require_type(_require_field(rt_raw, "key_type", rt_path), str, rt_path, "key_type")
-    if key_type not in SUPPORTED_KEY_TYPES:
-        raise ConfigError(
-            f"{rt_path.name}::key_type",
-            f"must be one of {list(SUPPORTED_KEY_TYPES)}, got {key_type!r}",
-        )
-
-    key_sort_order = _require_type(
-        _require_field(rt_raw, "key_sort_order", rt_path),
-        str,
-        rt_path,
-        "key_sort_order",
-    )
-    if key_sort_order not in SUPPORTED_KEY_SORT_ORDERS:
-        raise ConfigError(
-            f"{rt_path.name}::key_sort_order",
-            f"must be one of {list(SUPPORTED_KEY_SORT_ORDERS)}, got {key_sort_order!r}",
+            f"must be one of {list(SUPPORTED_PARTITION_STRATEGIES)}, "
+            f"got {partition_strategy!r}",
         )
 
     return RuntimeConfig(
         hash_method=hash_method,
         blake2b_digest_size=digest_size,
-        input_sorted=input_sorted,
         sort_temp_dir=sort_temp_dir,
         parallel_workers=parallel_workers,
         chunk_size=chunk_size,
         partition_strategy=partition_strategy,
-        key_type=key_type,
-        key_sort_order=key_sort_order,
     )
 
 
@@ -708,14 +377,18 @@ def _strip_comments(value: Any) -> Any:
     return value
 
 
-def _compute_audit_hash(
-    seg_raw: dict[str, Any],
-    norm_raw: dict[str, Any],
-    rt_raw: dict[str, Any],
-) -> str:
+def _compute_audit_hash(layout_a_path: Path, layout_b_path: Path, rt_raw: dict[str, Any]) -> str:
+    """SHA-256 over the canonicalized merged config bundle.
+
+    Layouts are read fresh from disk (rather than re-serializing the
+    typed objects) so the hash directly reflects the bytes the engine
+    was configured from, $comment fields excluded.
+    """
+    layout_a_raw = json.loads(layout_a_path.read_text(encoding="utf-8"))
+    layout_b_raw = json.loads(layout_b_path.read_text(encoding="utf-8"))
     bundle = {
-        "segments": _strip_comments(seg_raw),
-        "normalization": _strip_comments(norm_raw),
+        "layout_a": _strip_comments(layout_a_raw),
+        "layout_b": _strip_comments(layout_b_raw),
         "runtime": _strip_comments(rt_raw),
     }
     canonical = json.dumps(bundle, sort_keys=True, separators=(",", ":"))

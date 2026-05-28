@@ -9,6 +9,154 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-28 (ADR-033 three-stage migration to per-file layout configs)
+
+**Branch:** `dev`
+**Phase:** 2 (engine restructure — no phase change)
+**Status:** Engine cut over to the per-file layout schema. 188 tests
+pass on pyenv 3.12.7; `black`, `flake8`, `mypy --strict` all clean.
+
+### What was completed
+
+User asked for two adjacent things:
+1. **Per-file `key_range`** so File A and File B can put the record
+   key at different physical positions inside TU4R.
+2. **Drop the byte-level config form** (segments.json + normalization.json
+   with `file_a_strip` / `exclude_positions`) in favor of a single
+   per-file layout file where the operator describes what's *in* each
+   file (segments + named fields), not what to *strip* from it.
+
+Both land via **ADR-033**, executed as three commits:
+
+- **Stage 1** (`5abe898`) — schema + sample artifacts only. Wrote
+  `config/layout_file_A.json` and `config/layout_file_B.json` describing
+  the existing realistic fixture byte-for-byte (validated:
+  ``segment.size == header_bytes + sum(field.length)`` for every
+  segment; standard 3-TR01 record sums to 417 bytes, matching
+  `examples/README.md`). ADR-033 documents the schema, the eight
+  load-time invariants, and the three-stage migration plan.
+- **Stage 2** (`e0434ea`) — additive loader. `src/segment_compare/layout.py`
+  ships `FileLayout` / `SegmentLayout` / `FieldLayout` / `FileFormatConfig`
+  / `StripConfig` / `SortConfig` dataclasses plus
+  `load_file_layout(path) -> FileLayout`. Every load-time invariant is
+  enforced with `LayoutError` and a precise field path. 30 new tests
+  cover happy paths, defaults, and every invariant's failure mode.
+  Legacy loader untouched; nothing in the engine consumes `FileLayout` yet.
+- **Stage 3** (this commit) — engine cutover and legacy removal.
+
+Stage 3 changes:
+
+- **Parser** — `iter_records` now accepts `strip_leading_bytes: int = 0`
+  (per-record opaque skip applied before RDW). Order on the wire:
+  `[strip_leading_bytes][rdw][key_segment]…[end_segment][delimiter]`.
+  4 new tests pin the strip behavior.
+- **`config.py` rewritten** — `EngineConfig` holds two `FileLayout`s
+  plus a trimmed `RuntimeConfig` (dropped `input_sorted`, `key_type`,
+  `key_sort_order` — they live in each layout's `sort` block now).
+  Engine-facing accessors (`parser_a` / `parser_b` / `segments_a` /
+  `segments_b` / `file_a_rdw` / `file_b_rdw` / `file_a_strip_size` /
+  `file_b_strip_size`) synthesize the legacy per-file views.
+  `load_config(config_dir)` loads `layout_file_A.json` +
+  `layout_file_B.json` + `runtime.json`; layout errors re-raised as
+  `ConfigError` for uniform CLI exit code.
+- **Normalizer simplified** — `PositionNormalizer` and
+  `CompositeNormalizer` deleted; field-based is the only form.
+  `FieldNormalizationRule` + `FieldDef` moved into `normalizer.py`
+  (out of `config.py`) since they're internal to the normalizer.
+- **Pipeline / worker / external_sort** — all now thread per-file
+  `parser_*`, `segments_*`, `rdw_*`, `strip_size_*` through the
+  iter_records/seek/read paths. `external_sort_file` signature
+  decoupled from `EngineConfig` (takes `parser_cfg`, `segments_cfg`,
+  `chunk_size`, `sort_temp_dir`, optional `rdw_cfg`, `strip_size`).
+  The "should we sort?" trigger now reads `layout_a.sort.input_sorted`
+  and `layout_b.sort.input_sorted` independently; either one false
+  triggers the sort.
+- **CLI** — `--config-dir` help text and `--external-sort` help text
+  updated to describe layout-file semantics. Exit codes unchanged.
+- **Deleted from `config/`**: `segments.json`, `normalization.json`,
+  `segments.example-rdw.json`. Per-file RDW + strip blocks live
+  inside the layout files now.
+- **Test migration**: 188 tests pass (down from 242 — net delete of
+  Stage-2-redundant tests offset by Stage-3 additions).
+  - Deleted: `tests/test_normalizer.py` (PositionNormalizer +
+    CompositeNormalizer dispatch tests — both gone) and
+    `tests/test_field_config.py` (covered by `tests/test_layout.py`).
+  - `tests/test_config.py` rewritten for the new `EngineConfig` loader.
+  - `tests/test_field_normalizer.py` slimmed to FieldNormalizer-only
+    cases (CompositeNormalizer-specific tests dropped).
+  - `tests/test_field_integration.py` rewritten — the old
+    field-vs-position identity test is moot; the remaining
+    headline-capability test (A's NM01 has 2 fields, B's has 3 with
+    filler excluded) uses two diverging layouts to exercise the
+    per-file divergence pathway.
+  - `tests/test_pipeline.py`, `tests/test_main.py`,
+    `tests/test_external_sort.py` migrated to a new shared helper
+    (`tests/_helpers.py::minimal_layout` +
+    `write_minimal_config_dir` + `make_synthetic_record`) for the
+    smaller-than-realistic synthetic records.
+  - `tests/test_hasher.py`, `tests/test_comparator.py` updated to
+    drop deleted-type imports.
+- **Docs** — README repository-layout tree + bootstrap scripts +
+  `--config-dir` help reference the new files. `examples/README.md`
+  "How the engine is wired" section updated. `docs/architecture.md`
+  and `docs/how-it-works.md` got top-of-file ADR-033 callouts
+  pointing legacy snippets at the new shape. ADR-007, ADR-008,
+  ADR-029 marked superseded; ADR-031 (per-file RDW) updated to
+  reflect the absorbed location.
+
+### What's pending
+
+Phase 3 kickoff (FastAPI scaffolding) — unchanged from the prior
+handoff entry. ADR-033 was an engine-internal restructure; the
+phase pointer doesn't move.
+
+`docs/how-it-works.md` mid-document snippets still show
+`exclude_positions` byte-range examples. Those are accurate as
+*conceptual* descriptions of what the field-form layout achieves,
+just stylistically dated. A future docs pass can rewrite them to
+layout JSON if a real reader complains; for now the top-of-file
+callout flags the legacy form.
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-033**: per-file layout config replaces `segments.json` +
+  `normalization.json`. Supersedes ADR-007 (position-vs-field split),
+  ADR-008 (separate strip rules), and ADR-029 on dispatch.
+  Absorbs ADR-031 (per-file RDW now lives inside each layout).
+
+### Next concrete action
+
+Tag the cutover (optional) and resume the Phase 3 handoff plan
+below — open `docs/phase-3.md` and start the FastAPI scaffolding.
+Phase 3's `pipeline.run` / `run_parallel` consumer surface is
+unchanged; the wrapper just calls `load_config(config_dir)` against
+the new layout-file directory.
+
+### Notes for future me
+
+- `EngineConfig` accessors (`parser_a`, `segments_a`, etc.) recompute
+  on every access. If profiling shows them as hot, memoize. Probably
+  irrelevant — they're called O(1) times per run.
+- The minimal layout in `tests/_helpers.py` describes a 50-byte
+  synthetic record (TU4R023 + NM01017 + ENDS010). Don't try to
+  load it against the realistic sample files — those use the full
+  417-byte format and need the committed `config/` layouts.
+- `external_sort_file` no longer takes a `config` arg — explicitly
+  takes `parser_cfg`, `segments_cfg`, `chunk_size`, `sort_temp_dir`.
+  Cleaner for unit tests; pipeline-internal callers go through
+  `_external_sort_inputs` which still threads from `EngineConfig`.
+- `runtime.json`'s `input_sorted`, `key_type`, `key_sort_order` are
+  gone. If someone tries to load an old runtime.json, the new
+  loader silently ignores those fields (they're not in the
+  `_require_field` list). It does NOT migrate the values into the
+  layouts — the operator must explicitly move them.
+
+---
+
 ## Session: 2026-05-28 (Python floor lowered to 3.10+ for Windows compat)
 
 **Branch:** `dev`

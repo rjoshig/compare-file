@@ -16,18 +16,14 @@ from segment_compare.__main__ import (
     main,
 )
 
+from tests._helpers import make_synthetic_record as _make_record
+from tests._helpers import write_minimal_config_dir
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO_ROOT / "config"
 EXAMPLES = REPO_ROOT / "examples"
 SAMPLE_A = EXAMPLES / "sample_a.dat"
 SAMPLE_B = EXAMPLES / "sample_b.dat"
-
-
-def _make_record(key: str, name_data: bytes = b"NAME_XYZ__") -> bytes:
-    """Synthetic record matching the realistic config (key at TU4R [4,16))."""
-    assert len(key) == 12
-    assert len(name_data) == 10
-    return b"TU4R023DATA" + key.encode() + b"NM01017" + name_data + b"ENDS007"
 
 
 def _stamped_path(out_dir: Path, base: str) -> Path:
@@ -98,6 +94,7 @@ def test_main_all_matches_returns_ok(tmp_path: Path) -> None:
     a.write_bytes(payload)
     b.write_bytes(payload)
     out = tmp_path / "results"
+    cfg_dir = write_minimal_config_dir(tmp_path)
     code = main(
         [
             "--file-a",
@@ -105,7 +102,7 @@ def test_main_all_matches_returns_ok(tmp_path: Path) -> None:
             "--file-b",
             str(b),
             "--config-dir",
-            str(CONFIG_DIR),
+            str(cfg_dir),
             "--output-dir",
             str(out),
         ]
@@ -121,6 +118,7 @@ def test_main_orphans_only_returns_warnings(tmp_path: Path) -> None:
     a_file.write_bytes(_make_record("KEY000000001") + b"\n")
     b_file.write_bytes(_make_record("KEY000000999") + b"\n")
     out = tmp_path / "results"
+    cfg_dir = write_minimal_config_dir(tmp_path)
     code = main(
         [
             "--file-a",
@@ -128,7 +126,7 @@ def test_main_orphans_only_returns_warnings(tmp_path: Path) -> None:
             "--file-b",
             str(b_file),
             "--config-dir",
-            str(CONFIG_DIR),
+            str(cfg_dir),
             "--output-dir",
             str(out),
         ]

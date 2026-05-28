@@ -1,19 +1,14 @@
-"""Tests for ``FieldNormalizer`` + ``CompositeNormalizer``."""
+"""Tests for ``FieldNormalizer`` (ADR-033)."""
 
 from __future__ import annotations
 
 import pytest
 
-from segment_compare.config import (
-    FieldDef,
-    FieldNormalizationRule,
-    NormalizationRule,
-)
 from segment_compare.normalizer import (
     FIELD_SEPARATOR,
-    CompositeNormalizer,
+    FieldDef,
+    FieldNormalizationRule,
     FieldNormalizer,
-    PositionNormalizer,
 )
 
 # Reused layouts ---------------------------------------------------------
@@ -86,7 +81,7 @@ def test_field_normalizer_sorts_retained_fields_so_a_and_b_with_different_order_
 
 
 def test_field_normalizer_different_field_counts_a_vs_b_with_filler_excluded_matches() -> None:
-    """The user's headline case: B carries trailing filler that's excluded.
+    """Cross-system reconciliation: B carries trailing filler that's excluded.
 
     A's NM01 data = 35 bytes (2 fields). B's NM01 data = 40 bytes
     (2 fields + 5-byte filler marked exclude=True). Same logical
@@ -153,97 +148,3 @@ def test_field_normalizer_pass_through_for_segments_without_rules_in_mixed_map()
     norm = FieldNormalizer({"NM01": rule})
     # TR01 not in rules → raw_data returned unchanged.
     assert norm.normalize("TR01", b"abc", "A") == b"abc"
-
-
-# CompositeNormalizer -------------------------------------------------
-
-
-def test_composite_routes_position_segment_to_position_normalizer() -> None:
-    position = {
-        "CL01": NormalizationRule(
-            file_a_strip=(),
-            file_b_strip=(),
-            exclude_positions=((0, 3),),
-        ),
-    }
-    field: dict[str, FieldNormalizationRule] = {}
-    composite = CompositeNormalizer(position, field)
-
-    # CL01: exclude first 3 bytes → just "DEF"
-    assert composite.normalize("CL01", b"ABCDEF", "A") == b"DEF"
-
-
-def test_composite_routes_field_segment_to_field_normalizer() -> None:
-    position: dict[str, NormalizationRule] = {}
-    field = {
-        "NM01": FieldNormalizationRule(
-            file_a_layout=(
-                FieldDef(name="first", length=3, exclude=False),
-                FieldDef(name="last", length=3, exclude=False),
-            ),
-            file_b_layout=(
-                FieldDef(name="first", length=3, exclude=False),
-                FieldDef(name="last", length=3, exclude=False),
-            ),
-        ),
-    }
-    composite = CompositeNormalizer(position, field)
-
-    out = composite.normalize("NM01", b"ABCDEF", "A")
-    assert out == b"first=ABC" + FIELD_SEPARATOR + b"last=DEF"
-
-
-def test_composite_passes_through_segment_with_no_rule_in_either_map() -> None:
-    composite = CompositeNormalizer({}, {})
-    assert composite.normalize("XYZ1", b"raw bytes", "A") == b"raw bytes"
-
-
-def test_composite_rejects_segment_in_both_maps() -> None:
-    position = {
-        "NM01": NormalizationRule(file_a_strip=(), file_b_strip=(), exclude_positions=()),
-    }
-    field = {
-        "NM01": FieldNormalizationRule(
-            file_a_layout=(FieldDef(name="x", length=1, exclude=False),),
-            file_b_layout=(FieldDef(name="x", length=1, exclude=False),),
-        ),
-    }
-    with pytest.raises(ValueError, match="have both position and field rules"):
-        CompositeNormalizer(position, field)
-
-
-def test_composite_field_and_position_can_coexist_for_different_segments() -> None:
-    """Mixing the two forms across segments is the headline Phase 2 capability."""
-    position = {
-        "ENDS": NormalizationRule(file_a_strip=(), file_b_strip=(), exclude_positions=((0, 3),)),
-    }
-    field = {
-        "NM01": FieldNormalizationRule(
-            file_a_layout=(FieldDef(name="first", length=3, exclude=False),),
-            file_b_layout=(FieldDef(name="first", length=3, exclude=False),),
-        ),
-    }
-    composite = CompositeNormalizer(position, field)
-
-    # ENDS routes through position-based
-    assert composite.normalize("ENDS", b"012XYZ", "A") == b"XYZ"
-    # NM01 routes through field-based
-    assert composite.normalize("NM01", b"ABC", "A") == b"first=ABC"
-    # Unknown segment passes through
-    assert composite.normalize("OTHER", b"raw", "A") == b"raw"
-
-
-def test_composite_satisfies_normalizer_protocol_via_position_normalizer_signature() -> None:
-    """Smoke: CompositeNormalizer is duck-compatible with PositionNormalizer."""
-    # Build a position-only composite and confirm it produces the same output as
-    # a bare PositionNormalizer would. This is the contract the comparator relies on.
-    position = {
-        "CL01": NormalizationRule(
-            file_a_strip=(),
-            file_b_strip=(),
-            exclude_positions=((1, 3),),
-        ),
-    }
-    composite = CompositeNormalizer(position, {})
-    bare = PositionNormalizer(position)
-    assert composite.normalize("CL01", b"ABCDE", "A") == bare.normalize("CL01", b"ABCDE", "A")

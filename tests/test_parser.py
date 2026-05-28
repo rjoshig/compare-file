@@ -372,6 +372,51 @@ def test_rdw_config_total_bytes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# strip_leading_bytes prefix skip (ADR-033 / Stage 3)
+# ---------------------------------------------------------------------------
+
+
+def test_iter_records_with_strip_leading_bytes_skips_prefix() -> None:
+    body = b"TU4R019KEY000000001NM01017NAME_ALICEENDS007"
+    raw = b"XXYYZ" + body + b"\n"  # 5 opaque bytes before TU4R
+    records = list(
+        iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, strip_leading_bytes=5)
+    )
+    assert len(records) == 1
+    assert records[0].key == "KEY000000001"
+    assert records[0].offset == 5  # post-strip
+    assert records[0].length == len(body) + 1
+
+
+def test_iter_records_strip_then_rdw_then_key() -> None:
+    body = b"TU4R019KEY000000001NM01017NAME_ALICEENDS007"
+    raw = b"AAAAA" + b"\x2f\x00\x00\x00" + body + b"\n"  # 5 strip + 4 rdw + body + delim
+    rdw = RdwConfig(rdw1_bytes=2, rdw2_bytes=2, encoding="binary_le_uint")
+    records = list(
+        iter_records(
+            _stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, rdw_cfg=rdw, strip_leading_bytes=5
+        )
+    )
+    assert len(records) == 1
+    assert records[0].offset == 9  # 5 strip + 4 rdw
+
+
+def test_iter_records_truncated_strip_raises() -> None:
+    raw = b"AAA"  # 3 bytes, asking for 5
+    with pytest.raises(ParseError) as excinfo:
+        list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, strip_leading_bytes=5))
+    assert "leading-bytes strip" in excinfo.value.message
+
+
+def test_iter_records_strip_zero_is_identity() -> None:
+    body = b"TU4R019KEY000000001NM01017NAME_ALICEENDS007"
+    raw = body + b"\n"
+    a = list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS))
+    b = list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, strip_leading_bytes=0))
+    assert a == b
+
+
+# ---------------------------------------------------------------------------
 # Dataclass identity / frozen-ness
 # ---------------------------------------------------------------------------
 

@@ -1,4 +1,4 @@
-"""Tests for ``segment_compare.config``."""
+"""Tests for ``segment_compare.config`` (the post-ADR-033 ``EngineConfig`` loader)."""
 
 from __future__ import annotations
 
@@ -7,464 +7,230 @@ from pathlib import Path
 
 import pytest
 
-from segment_compare.config import (
-    ConfigError,
-    NormalizationRule,
-    ResolvedConfig,
-    RuntimeConfig,
-    load_config,
-)
-from segment_compare.parser import ParserConfig, SegmentsConfig
+from segment_compare.config import ConfigError, EngineConfig, RuntimeConfig, load_config
+from segment_compare.layout import FileLayout
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
-def _write_configs(
-    tmp_path: Path,
-    segments: dict | None = None,
-    normalization: dict | None = None,
-    runtime: dict | None = None,
-) -> Path:
-    """Write a triple of config files in ``tmp_path`` and return it."""
-    cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir(parents=True)
-    (cfg_dir / "segments.json").write_text(
-        json.dumps(segments if segments is not None else _default_segments())
-    )
-    (cfg_dir / "normalization.json").write_text(
-        json.dumps(normalization if normalization is not None else _default_normalization())
-    )
-    (cfg_dir / "runtime.json").write_text(
-        json.dumps(runtime if runtime is not None else _default_runtime())
-    )
-    return cfg_dir
-
-
-def _default_segments() -> dict:
-    return {
-        "known_segments": ["TU4R", "NM01", "ENDS"],
-        "key_segment": "TU4R",
-        "end_segment": "ENDS",
-        "key_range": [0, 12],
-        "record_delimiter": "\n",
-        "parser": {
-            "segment_name_bytes": 4,
-            "size_field_bytes": 3,
-            "size_encoding": "ascii_int",
-            "size_includes_header": True,
-            "data_encoding": "ascii",
-        },
-    }
-
-
-def _default_normalization() -> dict:
-    return {
-        "TU4R": {"file_a_strip": [], "file_b_strip": [], "exclude_positions": []},
-        "NM01": {
-            "file_a_strip": [[0, 2]],
-            "file_b_strip": [],
-            "exclude_positions": [[5, 7]],
-        },
-    }
-
-
-def _default_runtime() -> dict:
+def _runtime_payload() -> dict:
     return {
         "hash_method": "blake2b",
         "blake2b_digest_size": 16,
-        "input_sorted": True,
         "sort_temp_dir": "/tmp/segment_compare",
         "parallel_workers": 1,
         "chunk_size": 10000,
         "partition_strategy": "equal_count",
-        "key_type": "alphanumeric",
-        "key_sort_order": "ascending",
     }
 
 
+def _write_config_dir(
+    tmp_path: Path,
+    layout_a: dict | None = None,
+    layout_b: dict | None = None,
+    runtime: dict | None = None,
+) -> Path:
+    """Stage a config directory with the three required JSON files."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    layout_a_src = (
+        json.dumps(layout_a)
+        if layout_a is not None
+        else (CONFIG_DIR / "layout_file_A.json").read_text(encoding="utf-8")
+    )
+    layout_b_src = (
+        json.dumps(layout_b)
+        if layout_b is not None
+        else (CONFIG_DIR / "layout_file_B.json").read_text(encoding="utf-8")
+    )
+    (cfg_dir / "layout_file_A.json").write_text(layout_a_src)
+    (cfg_dir / "layout_file_B.json").write_text(layout_b_src)
+    (cfg_dir / "runtime.json").write_text(json.dumps(runtime if runtime else _runtime_payload()))
+    return cfg_dir
+
+
 # ---------------------------------------------------------------------------
-# Happy path
+# Happy path against the committed config/
 # ---------------------------------------------------------------------------
 
 
-def test_load_config_returns_resolved_config(tmp_path: Path) -> None:
-    cfg_dir = _write_configs(tmp_path)
-    resolved = load_config(cfg_dir)
-    assert isinstance(resolved, ResolvedConfig)
-    assert isinstance(resolved.parser, ParserConfig)
-    assert isinstance(resolved.segments, SegmentsConfig)
-    assert isinstance(resolved.runtime, RuntimeConfig)
-    assert resolved.segments.key_segment == "TU4R"
-    assert resolved.segments.end_segment == "ENDS"
-    assert resolved.segments.key_range == (0, 12)
-    assert resolved.segments.record_delimiter == b"\n"
-    assert resolved.known_segments == ("TU4R", "NM01", "ENDS")
-    assert "NM01" in resolved.normalization
-    assert resolved.normalization["NM01"].file_a_strip == ((0, 2),)
-    assert resolved.normalization["NM01"].exclude_positions == ((5, 7),)
-    assert resolved.runtime.hash_method == "blake2b"
-    assert resolved.runtime.sort_temp_dir == Path("/tmp/segment_compare")
-    assert len(resolved.audit_hash) == 64  # SHA-256 hex
-
-
-def test_load_config_loads_committed_configs() -> None:
-    """The committed config/ directory must load without error."""
+def test_load_committed_config() -> None:
     resolved = load_config(CONFIG_DIR)
-    assert resolved.parser.segment_name_bytes == 4
-    assert resolved.parser.size_field_bytes == 3
-    assert resolved.segments.key_segment == "TU4R"
-    assert resolved.segments.record_delimiter == b"\n"
+    assert isinstance(resolved, EngineConfig)
+    assert isinstance(resolved.layout_a, FileLayout)
+    assert isinstance(resolved.layout_b, FileLayout)
+    assert isinstance(resolved.runtime, RuntimeConfig)
+    assert len(resolved.audit_hash) == 64
+    # Engine-facing accessors
+    assert resolved.parser_a.segment_name_bytes == 4
+    assert resolved.parser_b.size_field_bytes == 3
+    assert resolved.segments_a.key_segment == "TU4R"
+    assert resolved.segments_a.end_segment == "ENDS"
+    assert resolved.segments_a.key_range == (4, 16)
+    assert resolved.segments_b.key_range == (4, 16)
+    assert resolved.file_a_rdw is None
+    assert resolved.file_b_rdw is None
+    assert resolved.file_a_strip_size == 0
+    assert resolved.file_b_strip_size == 0
+    # Normalization built from layouts: every segment in both layouts gets a rule.
+    assert {"TU4R", "NM01", "TR01", "ENDS"}.issubset(set(resolved.normalization))
+
+
+def test_committed_normalization_pairs_layouts() -> None:
+    """Each rule's file_a_layout / file_b_layout reflect the committed JSON."""
+    resolved = load_config(CONFIG_DIR)
+    nm01 = resolved.normalization["NM01"]
+    # The committed fixture has identical layouts for A and B.
+    assert nm01.file_a_layout == nm01.file_b_layout
+    names = [f.name for f in nm01.file_a_layout]
+    assert names == ["first_name", "middle_name", "last_name"]
+
+
+def test_known_segments_union_order(tmp_path: Path) -> None:
+    """A's segment order first, then B's extras."""
+    resolved = load_config(CONFIG_DIR)
+    # Both committed layouts have the same set; A's order should be preserved.
+    a_order = [s.name for s in resolved.layout_a.segments]
+    assert resolved.known_segments == tuple(a_order)
+
+
+# ---------------------------------------------------------------------------
+# Audit hash properties
+# ---------------------------------------------------------------------------
 
 
 def test_audit_hash_is_deterministic(tmp_path: Path) -> None:
-    """Loading the same configs twice produces the same hash."""
-    cfg_dir = _write_configs(tmp_path)
+    cfg_dir = _write_config_dir(tmp_path)
     h1 = load_config(cfg_dir).audit_hash
     h2 = load_config(cfg_dir).audit_hash
     assert h1 == h2
 
 
-def test_audit_hash_ignores_dollar_comment_keys(tmp_path: Path) -> None:
+def test_audit_hash_ignores_dollar_comments(tmp_path: Path) -> None:
     """Editing a $comment key must not change the audit hash."""
-    base = _default_segments()
-    h1 = load_config(_write_configs(tmp_path / "a", segments=base)).audit_hash
-    with_comment = {**base, "$comment": "edited"}
-    h2 = load_config(_write_configs(tmp_path / "b", segments=with_comment)).audit_hash
+    layout_a_raw = json.loads((CONFIG_DIR / "layout_file_A.json").read_text(encoding="utf-8"))
+    base = _write_config_dir(tmp_path / "base", layout_a=layout_a_raw)
+    h1 = load_config(base).audit_hash
+
+    layout_a_raw["$comment"] = "edited but should not affect the hash"
+    edited = _write_config_dir(tmp_path / "edited", layout_a=layout_a_raw)
+    h2 = load_config(edited).audit_hash
     assert h1 == h2
 
 
 def test_audit_hash_changes_when_meaningful_field_changes(tmp_path: Path) -> None:
-    base = _default_segments()
-    h1 = load_config(_write_configs(tmp_path / "a", segments=base)).audit_hash
-    changed = {**base, "key_range": [0, 10]}
-    h2 = load_config(_write_configs(tmp_path / "b", segments=changed)).audit_hash
+    layout_a_raw = json.loads((CONFIG_DIR / "layout_file_A.json").read_text(encoding="utf-8"))
+    base = _write_config_dir(tmp_path / "base", layout_a=layout_a_raw)
+    h1 = load_config(base).audit_hash
+
+    # Flip an exclude flag on a real field → different audit hash.
+    for seg in layout_a_raw["segments"]:
+        if seg["name"] == "NM01":
+            seg["fields"][0]["exclude"] = True
+            break
+    changed = _write_config_dir(tmp_path / "changed", layout_a=layout_a_raw)
+    h2 = load_config(changed).audit_hash
     assert h1 != h2
 
 
-def test_paths_record_source_files(tmp_path: Path) -> None:
-    cfg_dir = _write_configs(tmp_path)
-    resolved = load_config(cfg_dir)
-    assert resolved.paths["segments"] == cfg_dir / "segments.json"
-    assert resolved.paths["normalization"] == cfg_dir / "normalization.json"
-    assert resolved.paths["runtime"] == cfg_dir / "runtime.json"
-
-
 # ---------------------------------------------------------------------------
-# Missing / malformed files
+# Runtime.json validation
 # ---------------------------------------------------------------------------
 
 
-def test_missing_segments_file_raises(tmp_path: Path) -> None:
-    cfg_dir = _write_configs(tmp_path)
-    (cfg_dir / "segments.json").unlink()
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "does not exist" in excinfo.value.message
-
-
-def test_invalid_json_raises(tmp_path: Path) -> None:
-    cfg_dir = _write_configs(tmp_path)
-    (cfg_dir / "runtime.json").write_text("{not valid json")
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "invalid JSON" in excinfo.value.message
-
-
-def test_top_level_must_be_object(tmp_path: Path) -> None:
-    cfg_dir = _write_configs(tmp_path)
-    (cfg_dir / "segments.json").write_text("[]")
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "object" in excinfo.value.message
-
-
-# ---------------------------------------------------------------------------
-# segments.json validation
-# ---------------------------------------------------------------------------
-
-
-def test_unknown_key_segment_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["key_segment"] = "ZZZZ"
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "key_segment" in excinfo.value.field
-
-
-def test_unknown_end_segment_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["end_segment"] = "ZZZZ"
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "end_segment" in excinfo.value.field
-
-
-def test_key_equals_end_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["end_segment"] = "TU4R"
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "differ" in excinfo.value.message
-
-
-def test_invalid_key_range_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["key_range"] = [5, 5]  # end <= start
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "key_range" in excinfo.value.field
-
-
-def test_negative_key_range_start_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["key_range"] = [-1, 5]
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError):
-        load_config(cfg_dir)
-
-
-def test_duplicate_known_segments_raise(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["known_segments"] = ["TU4R", "TU4R", "ENDS"]
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "unique" in excinfo.value.message
-
-
-def test_empty_known_segments_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["known_segments"] = []
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError):
-        load_config(cfg_dir)
-
-
-def test_unsupported_parser_knob_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["parser"]["size_encoding"] = "binary_be_uint"
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "size_encoding" in excinfo.value.field
-
-
-def test_nondefault_segment_name_bytes_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["parser"]["segment_name_bytes"] = 5
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError):
-        load_config(cfg_dir)
-
-
-def test_non_ascii_delimiter_raises(tmp_path: Path) -> None:
-    seg = _default_segments()
-    seg["record_delimiter"] = "ÿ"  # Latin-1 only
-    cfg_dir = _write_configs(tmp_path, segments=seg)
-    with pytest.raises(ConfigError):
-        load_config(cfg_dir)
-
-
-# ---------------------------------------------------------------------------
-# normalization.json validation
-# ---------------------------------------------------------------------------
-
-
-def test_unknown_segment_in_normalization_raises(tmp_path: Path) -> None:
-    norm = {"ZZZZ": {"file_a_strip": [], "file_b_strip": [], "exclude_positions": []}}
-    cfg_dir = _write_configs(tmp_path, normalization=norm)
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "ZZZZ" in excinfo.value.field
-
-
-def test_normalization_ignores_dollar_keys(tmp_path: Path) -> None:
-    norm = {
-        "$comment": "this is fine",
-        "TU4R": {"file_a_strip": [], "file_b_strip": [], "exclude_positions": []},
-    }
-    cfg_dir = _write_configs(tmp_path, normalization=norm)
-    resolved = load_config(cfg_dir)
-    assert "TU4R" in resolved.normalization
-    assert "$comment" not in resolved.normalization
-
-
-def test_normalization_bad_range_raises(tmp_path: Path) -> None:
-    norm = {
-        "TU4R": {
-            "file_a_strip": [[5, 2]],  # end < start
-            "file_b_strip": [],
-            "exclude_positions": [],
-        }
-    }
-    cfg_dir = _write_configs(tmp_path, normalization=norm)
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(cfg_dir)
-    assert "file_a_strip" in excinfo.value.field
-
-
-def test_normalization_missing_optional_fields_defaults_to_empty(tmp_path: Path) -> None:
-    norm = {"TU4R": {}}
-    cfg_dir = _write_configs(tmp_path, normalization=norm)
-    resolved = load_config(cfg_dir)
-    rule = resolved.normalization["TU4R"]
-    assert rule.file_a_strip == ()
-    assert rule.file_b_strip == ()
-    assert rule.exclude_positions == ()
-
-
-# ---------------------------------------------------------------------------
-# runtime.json validation
-# ---------------------------------------------------------------------------
-
-
-def test_invalid_hash_method_raises(tmp_path: Path) -> None:
-    rt = _default_runtime()
+def test_runtime_invalid_hash_method_raises(tmp_path: Path) -> None:
+    rt = _runtime_payload()
     rt["hash_method"] = "md5"
-    cfg_dir = _write_configs(tmp_path, runtime=rt)
-    with pytest.raises(ConfigError):
+    cfg_dir = _write_config_dir(tmp_path, runtime=rt)
+    with pytest.raises(ConfigError) as excinfo:
         load_config(cfg_dir)
+    assert "hash_method" in excinfo.value.field
 
 
-def test_builtin_hash_method_is_accepted(tmp_path: Path) -> None:
-    rt = _default_runtime()
-    rt["hash_method"] = "builtin"
-    cfg_dir = _write_configs(tmp_path, runtime=rt)
-    resolved = load_config(cfg_dir)
-    assert resolved.runtime.hash_method == "builtin"
-
-
-def test_digest_size_out_of_range_raises(tmp_path: Path) -> None:
-    rt = _default_runtime()
+def test_runtime_digest_out_of_range_raises(tmp_path: Path) -> None:
+    rt = _runtime_payload()
     rt["blake2b_digest_size"] = 0
-    cfg_dir = _write_configs(tmp_path, runtime=rt)
+    cfg_dir = _write_config_dir(tmp_path, runtime=rt)
     with pytest.raises(ConfigError):
         load_config(cfg_dir)
 
 
-def test_zero_workers_raises(tmp_path: Path) -> None:
-    rt = _default_runtime()
+def test_runtime_zero_workers_raises(tmp_path: Path) -> None:
+    rt = _runtime_payload()
     rt["parallel_workers"] = 0
-    cfg_dir = _write_configs(tmp_path, runtime=rt)
+    cfg_dir = _write_config_dir(tmp_path, runtime=rt)
     with pytest.raises(ConfigError):
         load_config(cfg_dir)
 
 
-def test_zero_chunk_size_raises(tmp_path: Path) -> None:
-    rt = _default_runtime()
+def test_runtime_zero_chunk_size_raises(tmp_path: Path) -> None:
+    rt = _runtime_payload()
     rt["chunk_size"] = 0
-    cfg_dir = _write_configs(tmp_path, runtime=rt)
+    cfg_dir = _write_config_dir(tmp_path, runtime=rt)
     with pytest.raises(ConfigError):
         load_config(cfg_dir)
 
 
-def test_invalid_partition_strategy_raises(tmp_path: Path) -> None:
-    rt = _default_runtime()
+def test_runtime_invalid_partition_strategy_raises(tmp_path: Path) -> None:
+    rt = _runtime_payload()
     rt["partition_strategy"] = "random"
-    cfg_dir = _write_configs(tmp_path, runtime=rt)
+    cfg_dir = _write_config_dir(tmp_path, runtime=rt)
     with pytest.raises(ConfigError):
         load_config(cfg_dir)
 
 
-def test_missing_runtime_field_raises(tmp_path: Path) -> None:
-    rt = _default_runtime()
+def test_runtime_missing_field_raises(tmp_path: Path) -> None:
+    rt = _runtime_payload()
     del rt["hash_method"]
-    cfg_dir = _write_configs(tmp_path, runtime=rt)
+    cfg_dir = _write_config_dir(tmp_path, runtime=rt)
     with pytest.raises(ConfigError) as excinfo:
         load_config(cfg_dir)
     assert "hash_method" in excinfo.value.field
 
 
 # ---------------------------------------------------------------------------
-# Per-file RDW prefix (segments.json::parser.file_a.rdw / file_b.rdw)
+# Layout-error → ConfigError wrapping
 # ---------------------------------------------------------------------------
 
 
-def _segments_with_rdw(
-    file_a: dict | None = None,
-    file_b: dict | None = None,
-) -> dict:
-    seg = _default_segments()
-    if file_a is not None:
-        seg["parser"]["file_a"] = {"rdw": file_a}
-    if file_b is not None:
-        seg["parser"]["file_b"] = {"rdw": file_b}
-    return seg
-
-
-def test_load_config_rdw_absent_yields_none(tmp_path: Path) -> None:
-    cfg_dir = _write_configs(tmp_path)
-    resolved = load_config(cfg_dir)
-    assert resolved.file_a_rdw is None
-    assert resolved.file_b_rdw is None
-
-
-def test_load_config_rdw_both_files_present(tmp_path: Path) -> None:
-    rdw = {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"}
-    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(rdw, rdw))
-    resolved = load_config(cfg_dir)
-    assert resolved.file_a_rdw is not None
-    assert resolved.file_a_rdw.rdw1_bytes == 2
-    assert resolved.file_a_rdw.rdw2_bytes == 2
-    assert resolved.file_a_rdw.encoding == "binary_le_uint"
-    assert resolved.file_a_rdw.total_bytes == 4
-    assert resolved.file_b_rdw == resolved.file_a_rdw
-
-
-def test_load_config_rdw_only_file_a(tmp_path: Path) -> None:
-    rdw = {"rdw1_bytes": 2, "rdw2_bytes": 3, "encoding": "ascii_int"}
-    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(file_a=rdw))
-    resolved = load_config(cfg_dir)
-    assert resolved.file_a_rdw is not None
-    assert resolved.file_a_rdw.total_bytes == 5
-    assert resolved.file_b_rdw is None
-
-
-def test_load_config_rdw_invalid_encoding_raises(tmp_path: Path) -> None:
-    rdw = {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "ebcdic"}
-    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(file_a=rdw))
+def test_layout_error_re_raised_as_config_error(tmp_path: Path) -> None:
+    """A bad layout file surfaces as ConfigError for a uniform CLI exit code."""
+    layout_a_raw = json.loads((CONFIG_DIR / "layout_file_A.json").read_text(encoding="utf-8"))
+    # Wreck the per-segment size invariant.
+    layout_a_raw["segments"][0]["size"] = 999
+    cfg_dir = _write_config_dir(tmp_path, layout_a=layout_a_raw)
     with pytest.raises(ConfigError) as excinfo:
         load_config(cfg_dir)
-    assert "encoding" in excinfo.value.field
+    assert "segments[0].size" in excinfo.value.field
 
 
-def test_load_config_rdw_zero_size_raises(tmp_path: Path) -> None:
-    rdw = {"rdw1_bytes": 0, "rdw2_bytes": 2, "encoding": "ascii_int"}
-    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(file_a=rdw))
+def test_missing_layout_file_a_raises(tmp_path: Path) -> None:
+    cfg_dir = _write_config_dir(tmp_path)
+    (cfg_dir / "layout_file_A.json").unlink()
     with pytest.raises(ConfigError) as excinfo:
         load_config(cfg_dir)
-    assert "rdw1_bytes" in excinfo.value.field
+    assert "does not exist" in excinfo.value.message
 
 
-def test_load_config_rdw_missing_field_raises(tmp_path: Path) -> None:
-    rdw = {"rdw1_bytes": 2, "rdw2_bytes": 2}  # missing encoding
-    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(file_a=rdw))
+def test_missing_runtime_raises(tmp_path: Path) -> None:
+    cfg_dir = _write_config_dir(tmp_path)
+    (cfg_dir / "runtime.json").unlink()
     with pytest.raises(ConfigError) as excinfo:
         load_config(cfg_dir)
-    assert "encoding" in excinfo.value.field
+    assert "does not exist" in excinfo.value.message
 
 
-def test_load_example_rdw_config_in_repo(tmp_path: Path) -> None:
-    """The committed config/segments.example-rdw.json must load cleanly."""
-    example = json.loads((CONFIG_DIR / "segments.example-rdw.json").read_text(encoding="utf-8"))
-    cfg_dir = _write_configs(tmp_path, segments=example)
+def test_invalid_runtime_json_raises(tmp_path: Path) -> None:
+    cfg_dir = _write_config_dir(tmp_path)
+    (cfg_dir / "runtime.json").write_text("{not valid json")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(cfg_dir)
+    assert "invalid JSON" in excinfo.value.message
+
+
+def test_paths_recorded(tmp_path: Path) -> None:
+    cfg_dir = _write_config_dir(tmp_path)
     resolved = load_config(cfg_dir)
-    assert resolved.file_a_rdw is not None
-    assert resolved.file_b_rdw is not None
-    assert resolved.file_a_rdw.encoding == "binary_le_uint"
-    assert resolved.file_b_rdw.encoding == "ascii_int"
-
-
-# ---------------------------------------------------------------------------
-# Frozen-ness
-# ---------------------------------------------------------------------------
-
-
-def test_normalization_rule_is_frozen() -> None:
-    rule = NormalizationRule(file_a_strip=(), file_b_strip=(), exclude_positions=())
-    with pytest.raises(AttributeError):
-        rule.file_a_strip = ((0, 1),)  # type: ignore[misc]
+    assert resolved.paths["layout_a"] == cfg_dir / "layout_file_A.json"
+    assert resolved.paths["layout_b"] == cfg_dir / "layout_file_B.json"
+    assert resolved.paths["runtime"] == cfg_dir / "runtime.json"

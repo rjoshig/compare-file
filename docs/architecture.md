@@ -1,12 +1,20 @@
 # Architecture
 
+> **ADR-033 update**: the config now lives in two per-file layout files
+> (``config/layout_file_A.json`` + ``config/layout_file_B.json``) plus
+> ``config/runtime.json``. ``segments.json`` and ``normalization.json``
+> no longer exist; field-name-based comparison is the only normalization
+> form. Diagrams below show the legacy three-file shape and are kept
+> for historical context — replace ``segments.json + normalization.json``
+> with ``layout_file_A.json + layout_file_B.json`` mentally.
+
 ## High-level shape
 
 ```
                       +-------------------+
                       |       Configs     |
-                      | segments.json     |
-                      | normalization.json|
+                      | layout_file_A.json|
+                      | layout_file_B.json|
                       | runtime.json      |
                       +---------+---------+
                                 |

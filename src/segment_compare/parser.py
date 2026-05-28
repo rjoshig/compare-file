@@ -284,11 +284,14 @@ def iter_records(
     parser_cfg: ParserConfig,
     segments_cfg: SegmentsConfig,
     rdw_cfg: RdwConfig | None = None,
+    strip_leading_bytes: int = 0,
 ) -> Iterator[Record]:
     """Yield :class:`Record` instances framed by key + terminator segments.
 
     Each record must:
 
+    - optionally begin with ``strip_leading_bytes`` raw bytes that are
+      consumed and discarded (opaque prefix, applied before RDW),
     - optionally begin with a Record Descriptor Word prefix of
       ``rdw_cfg.total_bytes`` bytes (consumed and discarded; not parsed),
     - begin with a segment whose name equals ``segments_cfg.key_segment``,
@@ -296,18 +299,24 @@ def iter_records(
     - be followed by ``segments_cfg.record_delimiter`` (or EOF, for the
       final record).
 
+    Order on the wire is:
+    ``[strip_leading_bytes][rdw][key_segment]…[end_segment][delimiter]``.
+
     Args:
         stream: A binary readable stream positioned at the start of the
             first record.
         parser_cfg: Parser knobs.
         segments_cfg: Record-framing config.
         rdw_cfg: Optional :class:`RdwConfig`. When provided, the parser
-            skips ``rdw_cfg.total_bytes`` bytes before each record's key
-            segment. ``Record.offset`` and ``Record.length`` are reported
-            *relative to the key segment*, so seeking back via
-            ``(offset, length)`` reads the record without re-skipping
-            the RDW — this keeps the seek-and-read path uniform across
-            RDW-prefixed and plain inputs.
+            skips ``rdw_cfg.total_bytes`` bytes after the leading-bytes
+            strip and before the key segment. ``Record.offset`` and
+            ``Record.length`` are reported *relative to the key
+            segment*, so seeking back via ``(offset, length)`` reads
+            the record without re-skipping either prefix.
+        strip_leading_bytes: Number of raw bytes to consume and discard
+            at the head of each record, before RDW. Useful for opaque
+            block headers the engine doesn't need to interpret. ``0``
+            (default) disables the skip.
 
     Yields:
         Successive records as they are read from the stream.
@@ -316,7 +325,7 @@ def iter_records(
         ParseError: If a record does not start with the key segment,
             ends in EOF before the terminator, has an unexpected
             delimiter byte sequence, contains a corrupt segment, or has
-            a truncated RDW prefix.
+            a truncated RDW / leading-bytes strip.
     """
     offset = 0
     delimiter = segments_cfg.record_delimiter
@@ -325,6 +334,18 @@ def iter_records(
     rdw_total = rdw_cfg.total_bytes if rdw_cfg is not None else 0
 
     while True:
+        if strip_leading_bytes > 0:
+            strip_bytes = stream.read(strip_leading_bytes)
+            if not strip_bytes:
+                return
+            if len(strip_bytes) < strip_leading_bytes:
+                raise ParseError(
+                    offset,
+                    f"truncated leading-bytes strip: expected "
+                    f"{strip_leading_bytes} bytes, got {len(strip_bytes)}",
+                )
+            offset += strip_leading_bytes
+
         if rdw_total > 0:
             rdw_bytes = stream.read(rdw_total)
             if not rdw_bytes:

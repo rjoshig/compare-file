@@ -13,6 +13,12 @@ from segment_compare.parser import iter_records
 from segment_compare.pipeline import InputFileError, run
 from segment_compare.writer import stamped_filename
 
+from tests._helpers import (
+    make_synthetic_record as _make_record,
+    minimal_layout,
+    write_minimal_config_dir,
+)
+
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -24,17 +30,6 @@ FIXED_STAMP = "202605272239"
 
 def _stamped(out: Path, base: str, stamp: str = FIXED_STAMP) -> Path:
     return out / stamped_filename(base, stamp)
-
-
-def _make_record(key: str, name_data: bytes = b"NAME_XYZ__") -> bytes:
-    """One synthetic record matching the realistic config.
-
-    Format: ``TU4R023`` (key at TU4R data [4, 16) per the new config) +
-    ``NM01017`` + ``ENDS007``. Total 47 bytes on the wire (+ newline).
-    """
-    assert len(key) == 12, key
-    assert len(name_data) == 10, name_data
-    return b"TU4R023DATA" + key.encode() + b"NM01017" + name_data + b"ENDS007"
 
 
 def _write_file(path: Path, records: list[bytes]) -> None:
@@ -135,7 +130,7 @@ def test_all_matches_when_files_identical(tmp_path: Path) -> None:
     summary = run(
         tmp_path / "a.dat",
         tmp_path / "b.dat",
-        load_config(CONFIG_DIR),
+        load_config(write_minimal_config_dir(tmp_path)),
         tmp_path / "out",
         run_timestamp=FIXED_TS,
     )
@@ -163,7 +158,7 @@ def test_dup_keys_segregated_and_excluded_from_join(tmp_path: Path) -> None:
     summary = run(
         tmp_path / "a.dat",
         tmp_path / "b.dat",
-        load_config(CONFIG_DIR),
+        load_config(write_minimal_config_dir(tmp_path)),
         out,
         run_timestamp=FIXED_TS,
     )
@@ -192,7 +187,7 @@ def test_per_segment_counts_include_full_file_totals(tmp_path: Path) -> None:
     summary = run(
         tmp_path / "a.dat",
         tmp_path / "b.dat",
-        load_config(CONFIG_DIR),
+        load_config(write_minimal_config_dir(tmp_path)),
         tmp_path / "out",
         run_timestamp=FIXED_TS,
     )
@@ -206,7 +201,7 @@ def test_summary_audit_hash_matches_config(tmp_path: Path) -> None:
     _write_file(tmp_path / "a.dat", records)
     _write_file(tmp_path / "b.dat", records)
 
-    config = load_config(CONFIG_DIR)
+    config = load_config(write_minimal_config_dir(tmp_path))
     summary = run(
         tmp_path / "a.dat",
         tmp_path / "b.dat",
@@ -236,7 +231,7 @@ def test_empty_files_produce_empty_outputs(tmp_path: Path) -> None:
     summary = run(
         tmp_path / "a.dat",
         tmp_path / "b.dat",
-        load_config(CONFIG_DIR),
+        load_config(write_minimal_config_dir(tmp_path)),
         out,
         run_timestamp=FIXED_TS,
     )
@@ -260,7 +255,7 @@ def test_join_processes_keys_in_sorted_order(tmp_path: Path) -> None:
     run(
         tmp_path / "a.dat",
         tmp_path / "b.dat",
-        load_config(CONFIG_DIR),
+        load_config(write_minimal_config_dir(tmp_path)),
         out,
         run_timestamp=FIXED_TS,
     )
@@ -273,7 +268,7 @@ def test_join_processes_keys_in_sorted_order(tmp_path: Path) -> None:
 
 def test_output_records_are_parseable_round_trip(tmp_path: Path) -> None:
     """matches.dat content should re-parse as valid records."""
-    config = load_config(CONFIG_DIR)
+    config = load_config(write_minimal_config_dir(tmp_path))
     records = [_make_record(f"KEY00000000{i}") for i in (1, 2, 3)]
     _write_file(tmp_path / "a.dat", records)
     _write_file(tmp_path / "b.dat", records)
@@ -287,7 +282,7 @@ def test_output_records_are_parseable_round_trip(tmp_path: Path) -> None:
         run_timestamp=FIXED_TS,
     )
     with _stamped(out, "matches.dat").open("rb") as fh:
-        reparsed = list(iter_records(fh, config.parser, config.segments))
+        reparsed = list(iter_records(fh, config.parser_a, config.segments_a))
     assert [r.key for r in reparsed] == [
         "KEY000000001",
         "KEY000000002",
@@ -354,38 +349,24 @@ def test_single_record_with_multi_segment_mismatch_emits_multiple_report_rows(
     assert "KEY000000001,TR01,content_diff,1,1" in body_rows
 
 
-def _write_rdw_config_dir(tmp_path: Path, file_a_rdw: dict | None) -> Path:
-    """Clone the committed config into tmp_path, optionally adding an RDW block for file A."""
-    cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir()
-    segments = json.loads((CONFIG_DIR / "segments.json").read_text(encoding="utf-8"))
-    if file_a_rdw is not None:
-        segments["parser"]["file_a"] = {"rdw": file_a_rdw}
-    (cfg_dir / "segments.json").write_text(json.dumps(segments))
-    (cfg_dir / "normalization.json").write_text(
-        (CONFIG_DIR / "normalization.json").read_text(encoding="utf-8")
-    )
-    (cfg_dir / "runtime.json").write_text((CONFIG_DIR / "runtime.json").read_text(encoding="utf-8"))
-    return cfg_dir
-
-
 def test_run_with_rdw_prefixed_file_a_matches_plain_file_b(tmp_path: Path) -> None:
     """File A wrapped in a 4-byte RDW prefix per record must still match plain File B.
 
     Proves the parser skips rdw1+rdw2 bytes before each record and that
-    pipeline.run threads config.file_a_rdw / file_b_rdw correctly.
+    pipeline.run threads config.file_a_rdw / file_b_rdw correctly when
+    each layout file declares its own RDW (ADR-031, ADR-033).
     """
     rec = _make_record("KEY000000001")
     # File A: each record preceded by a 4-byte LE-uint RDW header.
-    rdw_prefix = b"\x2f\x00\x00\x00"  # 47 (record length, informational only)
+    rdw_prefix = b"\x32\x00\x00\x00"  # 50 (record length, informational only)
     (tmp_path / "a.dat").write_bytes(rdw_prefix + rec + b"\n")
     # File B: plain — no RDW prefix.
     (tmp_path / "b.dat").write_bytes(rec + b"\n")
 
-    cfg_dir = _write_rdw_config_dir(
-        tmp_path,
-        file_a_rdw={"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"},
-    )
+    # File A's layout opts into RDW; File B's stays None.
+    layout_a = minimal_layout()
+    layout_a["rdw"] = {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"}
+    cfg_dir = write_minimal_config_dir(tmp_path, layout_a=layout_a)
     config = load_config(cfg_dir)
     assert config.file_a_rdw is not None
     assert config.file_b_rdw is None
@@ -413,7 +394,7 @@ def test_default_timestamp_used_when_run_timestamp_omitted(tmp_path: Path) -> No
     summary = run(
         tmp_path / "a.dat",
         tmp_path / "b.dat",
-        load_config(CONFIG_DIR),
+        load_config(write_minimal_config_dir(tmp_path)),
         out,
     )
     # 12-digit YYYYMMDDHHMM stamp

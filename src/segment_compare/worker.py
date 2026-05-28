@@ -34,10 +34,10 @@ from pathlib import Path
 from typing import BinaryIO
 
 from segment_compare.comparator import compare_records
-from segment_compare.config import ResolvedConfig
+from segment_compare.config import EngineConfig
 from segment_compare.hasher import build_hasher
-from segment_compare.normalizer import CompositeNormalizer
-from segment_compare.parser import Record, iter_records
+from segment_compare.normalizer import FieldNormalizer
+from segment_compare.parser import ParserConfig, Record, SegmentsConfig, iter_records
 from segment_compare.writer import OutputWriter
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class WorkerPayload:
         offsets_b: Same for File B.
         file_a: Path to File A.
         file_b: Path to File B.
-        config: The full :class:`ResolvedConfig`. Pickled across the
+        config: The full :class:`EngineConfig`. Pickled across the
             process boundary; the per-worker normalizer + hasher are
             rebuilt locally.
         worker_output_dir: Where this worker writes its per-worker
@@ -70,7 +70,7 @@ class WorkerPayload:
     offsets_b: dict[str, tuple[int, int]]
     file_a: Path
     file_b: Path
-    config: ResolvedConfig
+    config: EngineConfig
     worker_output_dir: Path
 
 
@@ -116,8 +116,13 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
     config = payload.config
     payload.worker_output_dir.mkdir(parents=True, exist_ok=True)
 
-    normalizer = CompositeNormalizer(config.normalization, config.field_normalization)
+    normalizer = FieldNormalizer(config.normalization)
     hasher = build_hasher(config.runtime)
+
+    parser_a = config.parser_a
+    parser_b = config.parser_b
+    segments_a_cfg = config.segments_a
+    segments_b_cfg = config.segments_b
 
     matched = 0
     mismatched = 0
@@ -126,17 +131,18 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
 
     # Per-worker outputs use bare filenames (no stamp, no worker suffix);
     # the worker subdir already disambiguates them. The merger concatenates
-    # these into the run-level stamped files.
+    # these into the run-level stamped files. Output records use File A's
+    # delimiter (engine convention).
     with (
-        OutputWriter(payload.worker_output_dir, config.segments) as writer,
+        OutputWriter(payload.worker_output_dir, segments_a_cfg) as writer,
         payload.file_a.open("rb") as fh_a,
         payload.file_b.open("rb") as fh_b,
     ):
         for key in payload.keys:
             off_a, len_a = payload.offsets_a[key]
             off_b, len_b = payload.offsets_b[key]
-            rec_a = _read_record_at(fh_a, off_a, len_a, config)
-            rec_b = _read_record_at(fh_b, off_b, len_b, config)
+            rec_a = _read_record_at(fh_a, off_a, len_a, parser_a, segments_a_cfg)
+            rec_b = _read_record_at(fh_b, off_b, len_b, parser_b, segments_b_cfg)
             verdict = compare_records(rec_a, rec_b, normalizer, hasher)
 
             if verdict.matched:
@@ -172,15 +178,22 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
     )
 
 
-def _read_record_at(stream: BinaryIO, offset: int, length: int, config: ResolvedConfig) -> Record:
+def _read_record_at(
+    stream: BinaryIO,
+    offset: int,
+    length: int,
+    parser_cfg: ParserConfig,
+    segments_cfg: SegmentsConfig,
+) -> Record:
     """Seek to ``offset`` and parse the record sitting there.
 
     Mirrors ``pipeline._read_record_at`` so behavior is identical to
-    the single-process path.
+    the single-process path. ``offset``/``length`` already point past
+    any per-file RDW or leading-byte strip.
     """
     stream.seek(offset)
     buf = stream.read(length)
-    parsed = list(iter_records(io.BytesIO(buf), config.parser, config.segments))
+    parsed = list(iter_records(io.BytesIO(buf), parser_cfg, segments_cfg))
     if not parsed:
         raise RuntimeError(f"no record at offset {offset} (length {length}) in worker slice")
     return parsed[0]

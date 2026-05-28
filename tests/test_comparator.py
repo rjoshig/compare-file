@@ -11,7 +11,7 @@ from segment_compare.comparator import (
     compare_records,
 )
 from segment_compare.hasher import Blake2bHasher
-from segment_compare.normalizer import PositionNormalizer
+from segment_compare.normalizer import FieldNormalizer
 from segment_compare.parser import Record, Segment
 
 
@@ -24,7 +24,10 @@ def _record(key: str, segments: list[Segment]) -> Record:
     return Record(key=key, segments=tuple(segments), raw=raw, offset=0, length=len(raw))
 
 
-NORMALIZER = PositionNormalizer({})
+# Empty rules map means every segment passes through unchanged (raw bytes
+# compared directly), so these tests behave the same as before ADR-033
+# replaced PositionNormalizer with the field-based form.
+NORMALIZER = FieldNormalizer({})
 HASHER = Blake2bHasher()
 
 
@@ -156,13 +159,15 @@ def test_segment_verdicts_are_sorted_by_name() -> None:
 
 
 def test_compare_uses_normalizer_to_align_a_and_b() -> None:
-    """Strip A's leading 3 bytes so its NM01 matches B's NM01."""
-    from segment_compare.config import NormalizationRule
+    """A 5-byte NM01 field compares equal across A and B via field-name keying."""
+    from segment_compare.normalizer import FieldDef, FieldNormalizationRule
 
-    norm = PositionNormalizer(
-        {"NM01": NormalizationRule(file_a_strip=((0, 3),), file_b_strip=(), exclude_positions=())}
+    rule = FieldNormalizationRule(
+        file_a_layout=(FieldDef(name="name", length=5, exclude=False),),
+        file_b_layout=(FieldDef(name="name", length=5, exclude=False),),
     )
-    a = _record("K1", [_seg("TU4R", b"K1"), _seg("NM01", b"XYZalice"), _seg("ENDS", b"")])
+    norm = FieldNormalizer({"NM01": rule})
+    a = _record("K1", [_seg("TU4R", b"K1"), _seg("NM01", b"alice"), _seg("ENDS", b"")])
     b = _record("K1", [_seg("TU4R", b"K1"), _seg("NM01", b"alice"), _seg("ENDS", b"")])
     verdict = compare_records(a, b, norm, HASHER)
     assert verdict.matched is True
