@@ -179,6 +179,41 @@ class SegmentLayout:
 
 
 @dataclass(frozen=True, slots=True)
+class SegmentAlias:
+    """Context-sensitive segment rename rule.
+
+    When the parser yields a record, the pipeline scans its segments
+    in order. Once a segment named ``after_segment`` has appeared,
+    every subsequent occurrence of ``wire_name`` in that record is
+    renamed to ``logical_name`` *in memory* — the bytes on disk are
+    untouched. This lets a single on-wire segment name carry two
+    different logical meanings depending on where it sits in the
+    record (e.g., AD01 before EM01 is a regular address; AD01 after
+    EM01 is an email-related address declared as EMAD in the layout).
+
+    Once triggered, the rename stays in effect until the end of the
+    record (ADR-034). Records that contain ``wire_name`` but never
+    ``after_segment`` are not modified.
+
+    Attributes:
+        wire_name: The segment name as it appears on the wire (e.g.,
+            ``"AD01"``). Must be declared in :attr:`FileLayout.segments`.
+        logical_name: The name the engine should use for comparison /
+            reporting when the trigger has fired (e.g., ``"EMAD"``).
+            Must also be declared in :attr:`FileLayout.segments`, and
+            its declared ``size`` must match ``wire_name``'s ``size``
+            (the bytes are unchanged; only the comparison bucket
+            differs).
+        after_segment: The trigger segment (e.g., ``"EM01"``). Must
+            be declared in :attr:`FileLayout.segments`.
+    """
+
+    wire_name: str
+    logical_name: str
+    after_segment: str
+
+
+@dataclass(frozen=True, slots=True)
 class FileLayout:
     """Full layout description for one input file.
 
@@ -191,6 +226,9 @@ class FileLayout:
         sort: Per-file sort metadata.
         segments: Ordered tuple of segments. Order is documentation
             only; the parser is order-agnostic for non-role segments.
+        segment_aliases: Context-sensitive rename rules applied by
+            the pipeline post-parse. Empty tuple when the layout
+            declares no aliases.
         source_path: Path the layout was loaded from. Recorded for
             inclusion in audit logs and error messages.
     """
@@ -200,6 +238,7 @@ class FileLayout:
     rdw: RdwConfig | None
     sort: SortConfig
     segments: tuple[SegmentLayout, ...]
+    segment_aliases: tuple[SegmentAlias, ...]
     source_path: Path
 
     @property
@@ -274,12 +313,14 @@ def load_file_layout(path: Path) -> FileLayout:
     rdw = _build_rdw(raw, path)
     sort = _build_sort(raw, path)
     segments = _build_segments(raw, path, file_format)
+    segment_aliases = _build_segment_aliases(raw, path, segments)
     return FileLayout(
         file_format=file_format,
         strip_leading_bytes=strip,
         rdw=rdw,
         sort=sort,
         segments=segments,
+        segment_aliases=segment_aliases,
         source_path=path,
     )
 
@@ -594,3 +635,85 @@ def _build_fields(raw: list[Any], path: Path, base_path: str) -> tuple[FieldLayo
         seen_names.add(name)
         out.append(FieldLayout(name=name, length=length, exclude=exclude, key=key))
     return tuple(out)
+
+
+def _build_segment_aliases(
+    raw: dict[str, Any], path: Path, segments: tuple[SegmentLayout, ...]
+) -> tuple[SegmentAlias, ...]:
+    """Parse and validate the optional ``segment_aliases`` block.
+
+    Each entry must reference declared segments only; the wire and
+    logical segments must declare the same on-wire size; and a given
+    wire_name may carry at most one alias (multiple after-segment
+    triggers would create ambiguous rename rules).
+    """
+    aliases_raw = raw.get("segment_aliases")
+    if aliases_raw is None:
+        return ()
+    if not isinstance(aliases_raw, list):
+        raise LayoutError(
+            f"{path.name}::segment_aliases",
+            f"must be a list of alias objects, got {type(aliases_raw).__name__}",
+        )
+
+    by_name = {seg.name: seg for seg in segments}
+    aliases: list[SegmentAlias] = []
+    seen_wire: set[str] = set()
+
+    for i, item in enumerate(aliases_raw):
+        base_path = f"segment_aliases[{i}]"
+        if not isinstance(item, dict):
+            raise LayoutError(
+                f"{path.name}::{base_path}",
+                f"must be an object, got {type(item).__name__}",
+            )
+        wire_name = _require_field(item, "wire_name", path, f"{base_path}.wire_name")
+        logical_name = _require_field(item, "logical_name", path, f"{base_path}.logical_name")
+        after_segment = _require_field(item, "after_segment", path, f"{base_path}.after_segment")
+        _require_type(wire_name, str, path, f"{base_path}.wire_name")
+        _require_type(logical_name, str, path, f"{base_path}.logical_name")
+        _require_type(after_segment, str, path, f"{base_path}.after_segment")
+
+        for field_path, name in (
+            (f"{base_path}.wire_name", wire_name),
+            (f"{base_path}.logical_name", logical_name),
+            (f"{base_path}.after_segment", after_segment),
+        ):
+            if name not in by_name:
+                raise LayoutError(
+                    f"{path.name}::{field_path}",
+                    f"references undeclared segment {name!r}; " "must appear in segments[]",
+                )
+
+        if wire_name == logical_name:
+            raise LayoutError(
+                f"{path.name}::{base_path}",
+                f"wire_name and logical_name must differ, both are {wire_name!r}",
+            )
+
+        if by_name[wire_name].size != by_name[logical_name].size:
+            raise LayoutError(
+                f"{path.name}::{base_path}",
+                f"size mismatch: segment {wire_name!r} declares size "
+                f"{by_name[wire_name].size} but {logical_name!r} declares "
+                f"size {by_name[logical_name].size}; the rename uses the same "
+                "wire bytes so the two sizes must agree",
+            )
+
+        if wire_name in seen_wire:
+            raise LayoutError(
+                f"{path.name}::{base_path}.wire_name",
+                f"duplicate alias for wire_name {wire_name!r}; "
+                "at most one rule per wire segment",
+            )
+        seen_wire.add(wire_name)
+
+        aliases.append(
+            SegmentAlias(
+                wire_name=wire_name,
+                logical_name=logical_name,
+                after_segment=after_segment,
+            )
+        )
+
+    return tuple(aliases)

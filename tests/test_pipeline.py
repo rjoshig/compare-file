@@ -385,6 +385,162 @@ def test_run_with_rdw_prefixed_file_a_matches_plain_file_b(tmp_path: Path) -> No
     assert summary.records_mismatched == 0
 
 
+def test_segment_aliases_ad01_after_em01_compared_as_emad(tmp_path: Path) -> None:
+    """ADR-034 end-to-end: AD01 after EM01 should bucket as EMAD, not AD01.
+
+    Build records of shape:
+        TU4R + AD01(addr_a) + EM01 + AD01(addr_b) + ENDS
+    File A and File B have IDENTICAL bytes — so they must match.
+    But for the layout to validate at load time, EMAD must be declared
+    as a segment with the same size as AD01. The end-to-end run
+    should produce a clean match AND a per_segment summary that
+    includes EMAD as a distinct entry from AD01 (1 of each per record).
+    """
+    layout: dict = {
+        "file_format": {
+            "segment_name_bytes": 4,
+            "size_field_bytes": 3,
+            "size_encoding": "ascii_int",
+            "size_includes_header": True,
+            "data_encoding": "ascii",
+            "record_delimiter": "\n",
+        },
+        "strip_leading_bytes": None,
+        "rdw": None,
+        "sort": {"input_sorted": True, "order": "ascending", "key_type": "alphanumeric"},
+        "segments": [
+            {
+                "name": "TU4R",
+                "role": "key",
+                "size": 23,
+                "fields": [
+                    {"name": "data_prefix", "length": 4, "exclude": True},
+                    {"name": "account_nbr", "length": 12, "key": True},
+                ],
+            },
+            {
+                "name": "AD01",
+                "size": 17,
+                "fields": [{"name": "street", "length": 10}],
+            },
+            {
+                "name": "EM01",
+                "size": 14,
+                "fields": [{"name": "email", "length": 7}],
+            },
+            {
+                "name": "EMAD",
+                "size": 17,
+                "fields": [{"name": "email_addr", "length": 10}],
+            },
+            {
+                "name": "ENDS",
+                "role": "end",
+                "size": 10,
+                "fields": [{"name": "segment_count", "length": 3, "exclude": True}],
+            },
+        ],
+        "segment_aliases": [{"wire_name": "AD01", "logical_name": "EMAD", "after_segment": "EM01"}],
+    }
+    cfg_dir = write_minimal_config_dir(tmp_path, layout_a=layout, layout_b=layout)
+
+    # Build the record manually (TU4R023 + AD01017 + EM01014 + AD01017 + ENDS010).
+    def _record(key: str, addr1: bytes, email: bytes, addr2: bytes) -> bytes:
+        assert len(addr1) == 10 and len(email) == 7 and len(addr2) == 10
+        return (
+            b"TU4R023DATA"
+            + key.encode("ascii")
+            + b"AD01017"
+            + addr1
+            + b"EM01014"
+            + email
+            + b"AD01017"
+            + addr2
+            + b"ENDS010001"
+        )
+
+    rec = _record("KEY000000001", b"123 MAIN  ", b"u@ex.io", b"FROMEMAIL ")
+    (tmp_path / "a.dat").write_bytes(rec + b"\n")
+    (tmp_path / "b.dat").write_bytes(rec + b"\n")
+
+    out = tmp_path / "out"
+    summary = run(
+        tmp_path / "a.dat",
+        tmp_path / "b.dat",
+        load_config(cfg_dir),
+        out,
+        run_timestamp=FIXED_TS,
+    )
+    # Identical records → match.
+    assert summary.records_matched == 1
+    assert summary.records_mismatched == 0
+
+    # per_segment must show EMAD as its own row (1 in A, 1 in B), not lumped under AD01.
+    by_name = {s.segment_name: s for s in summary.per_segment}
+    assert "EMAD" in by_name, f"EMAD missing from per_segment: {list(by_name)}"
+    assert by_name["AD01"].total_in_a == 1, by_name["AD01"]
+    assert by_name["AD01"].total_in_b == 1
+    assert by_name["EMAD"].total_in_a == 1
+    assert by_name["EMAD"].total_in_b == 1
+
+
+def test_segment_aliases_ad01_without_em01_keeps_ad01_name(tmp_path: Path) -> None:
+    """A record that has AD01 but never EM01 should NOT rename any AD01 to EMAD."""
+    layout = {
+        "file_format": {
+            "segment_name_bytes": 4,
+            "size_field_bytes": 3,
+            "size_encoding": "ascii_int",
+            "size_includes_header": True,
+            "data_encoding": "ascii",
+            "record_delimiter": "\n",
+        },
+        "strip_leading_bytes": None,
+        "rdw": None,
+        "sort": {"input_sorted": True, "order": "ascending", "key_type": "alphanumeric"},
+        "segments": [
+            {
+                "name": "TU4R",
+                "role": "key",
+                "size": 23,
+                "fields": [
+                    {"name": "data_prefix", "length": 4, "exclude": True},
+                    {"name": "account_nbr", "length": 12, "key": True},
+                ],
+            },
+            {"name": "AD01", "size": 17, "fields": [{"name": "street", "length": 10}]},
+            {"name": "EM01", "size": 14, "fields": [{"name": "email", "length": 7}]},
+            {"name": "EMAD", "size": 17, "fields": [{"name": "email_addr", "length": 10}]},
+            {
+                "name": "ENDS",
+                "role": "end",
+                "size": 10,
+                "fields": [{"name": "segment_count", "length": 3, "exclude": True}],
+            },
+        ],
+        "segment_aliases": [{"wire_name": "AD01", "logical_name": "EMAD", "after_segment": "EM01"}],
+    }
+    cfg_dir = write_minimal_config_dir(tmp_path, layout_a=layout, layout_b=layout)
+
+    # Record without EM01 — AD01 should stay AD01.
+    rec = b"TU4R023DATA" + b"KEY000000001" + b"AD01017" + b"123 MAIN  " + b"ENDS010001"
+    (tmp_path / "a.dat").write_bytes(rec + b"\n")
+    (tmp_path / "b.dat").write_bytes(rec + b"\n")
+
+    out = tmp_path / "out"
+    summary = run(
+        tmp_path / "a.dat",
+        tmp_path / "b.dat",
+        load_config(cfg_dir),
+        out,
+        run_timestamp=FIXED_TS,
+    )
+    assert summary.records_matched == 1
+    by_name = {s.segment_name: s for s in summary.per_segment}
+    assert by_name["AD01"].total_in_a == 1
+    assert "EMAD" not in by_name or by_name["EMAD"].total_in_a == 0
+
+
 def test_default_timestamp_used_when_run_timestamp_omitted(tmp_path: Path) -> None:
     """When run_timestamp is not supplied, pipeline.run uses now() and stamps files."""
     records = [_make_record("KEY000000001")]

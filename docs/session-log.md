@@ -9,6 +9,103 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-28 (ADR-034: context-sensitive segment aliasing)
+
+**Branch:** `dev`
+**Phase:** 2 (engine extension)
+**Status:** 199 tests passing on pyenv 3.12.7; black, flake8, mypy
+--strict clean.
+
+### What was completed
+
+User asked for a real-world scenario: in their feed, `AD01` segments
+appearing **before** an `EM01` are ordinary postal addresses, but
+`AD01` segments appearing **after** an `EM01` are email-related
+addresses. The multiset comparator needs to treat them as separate
+buckets so a postal-address difference can't mask an email-address
+difference. On-wire bytes are immutable (operator doesn't control
+upstream); the rename has to happen at parse time, in memory.
+
+ADR-034 ships:
+
+- `layout.py`: new `SegmentAlias` dataclass (`wire_name`,
+  `logical_name`, `after_segment`); optional
+  `segment_aliases: tuple[SegmentAlias, ...]` field on `FileLayout`.
+  Load-time validation: every referenced name must exist in
+  `segments[]`; wire and logical sizes must match; wire and logical
+  must differ; at most one alias per `wire_name`. Aliases default to
+  empty tuple when omitted.
+- `config.py`: `EngineConfig.file_a_aliases` / `file_b_aliases`
+  expose the per-file alias rules to engine modules.
+- `pipeline.py`: new `_apply_aliases(record, aliases)` helper. Walks
+  segments in order; once `after_segment` has appeared in the current
+  record, every subsequent `wire_name` is renamed to `logical_name`
+  in memory (raw bytes untouched). Wired into `_index_file` and
+  `_read_record_at`. Trigger semantics: once-armed-stays-armed
+  within a record; resets at record boundaries.
+- `worker.py`: same rename logic in `_read_record_at`, gated on
+  `EngineConfig.file_a_aliases` / `file_b_aliases`.
+- External-sort behavior: aliases are NOT applied during the sort
+  pass (sort preserves raw on-wire bytes). The post-sort index pass
+  re-applies the rename. The sorted file still carries on-wire
+  segment names; no special handling needed.
+- Output files (matches.dat / mismatches.dat / dups_*.dat /
+  keymismatch_*.dat) continue to carry on-wire segment names since
+  they emit `record.raw`. Only `summary.json::per_segment` and
+  `report.csv`'s `segment_name` column reflect the rename.
+
+Tests (11 new, 188 → 199):
+- 9 layout-loader cases in `test_layout.py`: default-empty,
+  round-trip, every validation rule (wire/logical/after_segment must
+  be declared, sizes must match, wire ≠ logical, one alias per wire,
+  must be list).
+- 2 end-to-end pipeline cases in `test_pipeline.py`:
+  AD01-after-EM01 records bucket as separate `AD01` + `EMAD` entries
+  in `summary.per_segment`; AD01-without-EM01 records keep `AD01`.
+
+### What's pending
+
+Phase 3 kickoff (FastAPI scaffolding) — unchanged. ADR-034 is an
+engine-internal extension; phase pointer doesn't move.
+
+Out of scope for this ADR (recorded for future work):
+- Multiple aliases for the same `wire_name` (precedence rules).
+- Reset-on-trigger semantics (only the AD01 immediately following
+  the most-recent EM01 renames).
+- CLI override for alias rules.
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-034**: per-file `segment_aliases` block declares
+  context-sensitive renames applied post-parse. Once-triggered
+  semantics; one alias per `wire_name`; sizes must match between
+  wire and logical declarations.
+
+### Next concrete action
+
+Resume the Phase 3 handoff plan in the entry further below — open
+`docs/phase-3.md` and start FastAPI scaffolding. ADR-034 is
+transparent to Phase 3 callers since `pipeline.run` / `run_parallel`
+read aliases from the already-loaded `EngineConfig`.
+
+### Notes for future me
+
+- The rename helper lives in `pipeline._apply_aliases` AND a near-
+  copy in `worker._read_record_at` (cross-process boundary makes
+  sharing awkward). If we add a second alias use case, factor it
+  into a shared helper module.
+- `record.raw` is the on-wire bytes. Tests that read .dat output
+  files and look for segment names should look for the *on-wire*
+  name, not the logical one. This is intentional — operators reading
+  matches.dat see what was in their input, not the engine's logical
+  view.
+
+---
+
 ## Session: 2026-05-28 (ADR-033 three-stage migration to per-file layout configs)
 
 **Branch:** `dev`

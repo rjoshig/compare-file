@@ -12,6 +12,7 @@ from segment_compare.layout import (
     FileFormatConfig,
     FileLayout,
     LayoutError,
+    SegmentAlias,
     SegmentLayout,
     SortConfig,
     StripConfig,
@@ -351,6 +352,138 @@ def test_sort_bad_key_type_raises(tmp_path: Path) -> None:
     p = _write(tmp_path, data)
     with pytest.raises(LayoutError):
         load_file_layout(p)
+
+
+# ---------------------------------------------------------------------------
+# segment_aliases (ADR-034)
+# ---------------------------------------------------------------------------
+
+
+def _layout_with_three_segments() -> dict:
+    """Layout with TU4R (key), MID (ordinary), ENDS (end) — fertile ground for aliases."""
+    data = _minimal_layout()
+    # Insert a MID segment between TU4R and ENDS.
+    data["segments"].insert(
+        1,
+        {
+            "name": "MID",
+            "size": 10,
+            "fields": [{"name": "payload", "length": 3}],
+        },
+    )
+    # Insert a second TU4R-shaped segment to alias to.
+    data["segments"].append(
+        {
+            "name": "TU4R_AFTER",
+            "size": 19,
+            "fields": [{"name": "renamed_data", "length": 12}],
+        }
+    )
+    return data
+
+
+def test_segment_aliases_default_to_empty_tuple_when_absent(tmp_path: Path) -> None:
+    """Layouts that don't declare aliases get an empty tuple, not None."""
+    p = _valid_minimal(tmp_path)
+    layout = load_file_layout(p)
+    assert layout.segment_aliases == ()
+
+
+def test_segment_aliases_round_trip(tmp_path: Path) -> None:
+    data = _layout_with_three_segments()
+    data["segment_aliases"] = [
+        {"wire_name": "TU4R", "logical_name": "TU4R_AFTER", "after_segment": "MID"}
+    ]
+    p = _write(tmp_path, data)
+    layout = load_file_layout(p)
+    assert layout.segment_aliases == (
+        SegmentAlias(wire_name="TU4R", logical_name="TU4R_AFTER", after_segment="MID"),
+    )
+
+
+def test_segment_aliases_wire_must_be_declared(tmp_path: Path) -> None:
+    data = _layout_with_three_segments()
+    data["segment_aliases"] = [
+        {"wire_name": "MISSING", "logical_name": "TU4R_AFTER", "after_segment": "MID"}
+    ]
+    p = _write(tmp_path, data)
+    with pytest.raises(LayoutError) as excinfo:
+        load_file_layout(p)
+    assert "wire_name" in excinfo.value.field
+    assert "MISSING" in excinfo.value.message
+
+
+def test_segment_aliases_logical_must_be_declared(tmp_path: Path) -> None:
+    data = _layout_with_three_segments()
+    data["segment_aliases"] = [
+        {"wire_name": "TU4R", "logical_name": "MISSING", "after_segment": "MID"}
+    ]
+    p = _write(tmp_path, data)
+    with pytest.raises(LayoutError) as excinfo:
+        load_file_layout(p)
+    assert "logical_name" in excinfo.value.field
+
+
+def test_segment_aliases_after_segment_must_be_declared(tmp_path: Path) -> None:
+    data = _layout_with_three_segments()
+    data["segment_aliases"] = [
+        {"wire_name": "TU4R", "logical_name": "TU4R_AFTER", "after_segment": "NOSUCH"}
+    ]
+    p = _write(tmp_path, data)
+    with pytest.raises(LayoutError) as excinfo:
+        load_file_layout(p)
+    assert "after_segment" in excinfo.value.field
+
+
+def test_segment_aliases_wire_and_logical_must_have_same_size(tmp_path: Path) -> None:
+    data = _layout_with_three_segments()
+    # Mismatch: TU4R is 19, but make TU4R_AFTER 22.
+    data["segments"][-1]["size"] = 22
+    data["segments"][-1]["fields"] = [{"name": "renamed_data", "length": 15}]
+    data["segment_aliases"] = [
+        {"wire_name": "TU4R", "logical_name": "TU4R_AFTER", "after_segment": "MID"}
+    ]
+    p = _write(tmp_path, data)
+    with pytest.raises(LayoutError) as excinfo:
+        load_file_layout(p)
+    assert "size mismatch" in excinfo.value.message
+
+
+def test_segment_aliases_wire_and_logical_must_differ(tmp_path: Path) -> None:
+    data = _layout_with_three_segments()
+    data["segment_aliases"] = [
+        {"wire_name": "TU4R", "logical_name": "TU4R", "after_segment": "MID"}
+    ]
+    p = _write(tmp_path, data)
+    with pytest.raises(LayoutError) as excinfo:
+        load_file_layout(p)
+    assert "must differ" in excinfo.value.message
+
+
+def test_segment_aliases_one_per_wire_name(tmp_path: Path) -> None:
+    """Two aliases sharing the same wire_name is a config error."""
+    data = _layout_with_three_segments()
+    # Add a third segment to alias to.
+    data["segments"].append(
+        {"name": "TU4R_OTHER", "size": 19, "fields": [{"name": "x", "length": 12}]}
+    )
+    data["segment_aliases"] = [
+        {"wire_name": "TU4R", "logical_name": "TU4R_AFTER", "after_segment": "MID"},
+        {"wire_name": "TU4R", "logical_name": "TU4R_OTHER", "after_segment": "ENDS"},
+    ]
+    p = _write(tmp_path, data)
+    with pytest.raises(LayoutError) as excinfo:
+        load_file_layout(p)
+    assert "duplicate alias" in excinfo.value.message
+
+
+def test_segment_aliases_must_be_list(tmp_path: Path) -> None:
+    data = _layout_with_three_segments()
+    data["segment_aliases"] = "not a list"
+    p = _write(tmp_path, data)
+    with pytest.raises(LayoutError) as excinfo:
+        load_file_layout(p)
+    assert "segment_aliases" in excinfo.value.field
 
 
 # ---------------------------------------------------------------------------

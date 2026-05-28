@@ -905,6 +905,132 @@ regression so this ADR can be amended.
 
 ---
 
+## ADR-034 — Context-sensitive segment aliasing (AD01-after-EM01 → EMAD)
+
+**Status:** accepted; extends ADR-033
+
+**Context:** A real-world feed reuses a single on-wire segment name
+for two distinct logical meanings depending on where it sits in the
+record. Concrete example from the user: ``AD01`` segments appearing
+before an ``EM01`` segment in a record are ordinary postal addresses;
+``AD01`` segments appearing **after** an ``EM01`` are email-related
+addresses. They must be compared as separate buckets so a difference
+in the postal-address group doesn't mask a difference in the
+email-address group (or vice versa). The on-wire bytes cannot be
+changed (the operator does not control the upstream extract).
+
+The multiset-of-hashes comparator (ADR-001) already buckets segments
+by name, so the fix is to give the second group of ``AD01`` a
+*different* name at parse time. Renaming downstream — at the
+comparator or normalizer level — would force every consumer
+(comparator + normalizer + writer + summary aggregation) to learn
+about aliases. Renaming once, right after parse, keeps the rest of
+the engine oblivious.
+
+**Decision:** Add an optional ``segment_aliases`` block to each layout
+file. The pipeline walks each parsed record's segments in order; the
+instant an ``after_segment`` is seen, every subsequent
+``wire_name`` occurrence in that record is renamed to ``logical_name``
+in memory. The on-disk bytes are never modified.
+
+### Schema (per layout file)
+
+```jsonc
+{
+  ...
+  "segment_aliases": [
+    { "wire_name": "AD01", "logical_name": "EMAD", "after_segment": "EM01" }
+  ],
+  "segments": [
+    { "name": "TU4R", "role": "key", ... },
+    { "name": "AD01", "size": 50, "fields": [ /* postal-address fields */ ] },
+    { "name": "EM01", "size": 45, "fields": [ /* email fields */ ] },
+    { "name": "EMAD", "size": 50, "fields": [ /* email-address fields */ ] },
+    { "name": "ENDS", "role": "end", ... }
+  ]
+}
+```
+
+- ``segment_aliases`` is optional; omitted or empty list = no aliases.
+- ``wire_name``, ``logical_name``, and ``after_segment`` must all be
+  declared in ``segments[]``. Both shapes are needed because each
+  logical name carries its own field layout (the post-EM01 ``AD01``
+  bytes may be sliced and labeled differently from the pre-EM01
+  ones).
+- ``wire_name`` and ``logical_name`` must differ.
+- Per-segment ``size`` for ``wire_name`` and ``logical_name`` must
+  match — the same wire bytes are re-bucketed, not re-sized.
+- At most **one alias per ``wire_name``** in a single layout. Mapping
+  one wire segment to multiple logical names under different
+  triggers would create ambiguous rename precedence; declared
+  explicitly out of scope.
+- Per-file (declared in each ``layout_file_*.json`` independently).
+  In practice A and B will usually carry identical aliases, but the
+  schema doesn't force symmetry. If A renames but B doesn't, the
+  comparator will surface count differences on the renamed segment
+  — that's the operator's choice.
+
+### Trigger semantics
+
+- **Once-triggered, stays-triggered within a record.** After
+  ``after_segment`` has appeared in the current record, every
+  subsequent ``wire_name`` is renamed until the record ends. Even if
+  the trigger segment appears multiple times, the engine doesn't
+  reset — there's no need to track which trigger "owns" a given
+  rename.
+- **No trigger, no rename.** A record that contains ``wire_name`` but
+  no ``after_segment`` is left untouched (the rename never fires).
+  Records with neither, or with only the trigger, are also untouched.
+- **Per-record scope.** The trigger state resets at every record
+  boundary; one record's EM01 cannot trigger renames in the next
+  record.
+
+### Where the rename runs
+
+The parser stays pure — :class:`Segment` instances yielded by
+``iter_records`` always carry the on-wire name. A pipeline-level
+helper, ``pipeline._apply_aliases(record, aliases)``, returns a new
+:class:`Record` whose ``segments`` tuple has any in-context
+``wire_name`` instances rewritten to ``logical_name``. Wired into:
+
+- ``pipeline._index_file`` — so per-segment counts in
+  ``summary.json`` bucket renamed segments separately.
+- ``pipeline._read_record_at`` and ``worker._read_record_at`` —
+  so the comparator sees the logical names when hashing.
+
+``external_sort`` does *not* apply the rename: the sort path
+preserves raw bytes (record.raw is the on-wire encoding). The sorted
+output still carries the wire names; the post-sort index pass re-applies
+the rename. ``record.raw`` (used by dups/orphans/matches/mismatches
+file writes) is unchanged, so on-disk output files retain the
+original on-wire segment names — the rename is purely a comparison-time
+concept.
+
+### Consequences
+
+- Operators can split one wire segment into multiple comparison
+  buckets without touching the input files. Configuration-only fix.
+- ``summary.json``'s ``per_segment`` block carries separate entries
+  for ``AD01`` and ``EMAD``; ``report.csv`` rows for renamed
+  segments cite the logical name. ``matches.dat`` /
+  ``mismatches.dat`` / ``dups_*.dat`` / ``keymismatch_*.dat`` show
+  the raw on-wire names since they emit ``record.raw``.
+- The "one alias per wire_name" rule keeps the trigger logic
+  unambiguous. A future ADR could relax this by introducing
+  precedence rules (e.g., most-recently-triggered wins) if a real
+  use case demands it.
+- ``FileLayout`` and ``EngineConfig`` gain ``segment_aliases`` and
+  ``file_a_aliases`` / ``file_b_aliases`` respectively. The audit
+  hash (ADR-017) automatically covers the new field since it hashes
+  the raw layout JSON.
+- 11 new tests pin the behavior:
+  - 9 layout-loader cases (default-empty, round-trip, every
+    validation rule).
+  - 2 end-to-end pipeline cases (AD01-after-EM01 buckets as EMAD;
+    AD01-without-EM01 stays as AD01).
+
+---
+
 ## ADR-033 — Single per-file layout config replaces segments.json + normalization.json
 
 **Status:** accepted (Stage 1: schema landed); supersedes **ADR-007**

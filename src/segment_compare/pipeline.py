@@ -37,9 +37,17 @@ from segment_compare.comparator import compare_records
 from segment_compare.config import EngineConfig
 from segment_compare.external_sort import external_sort_file
 from segment_compare.hasher import build_hasher
+from segment_compare.layout import SegmentAlias
 from segment_compare.merger import fold_partial_summaries, merge_worker_outputs
 from segment_compare.normalizer import FieldNormalizer
-from segment_compare.parser import ParserConfig, Record, RdwConfig, SegmentsConfig, iter_records
+from segment_compare.parser import (
+    ParserConfig,
+    Record,
+    RdwConfig,
+    Segment,
+    SegmentsConfig,
+    iter_records,
+)
 from segment_compare.partitioner import equal_count_partition
 from segment_compare.worker import WorkerPayload, WorkerResult, run_worker
 from segment_compare.writer import (
@@ -90,6 +98,7 @@ def dry_run(file_a: Path, file_b: Path, config: EngineConfig) -> DryRunReport:
         config.segments_a,
         config.file_a_rdw,
         config.file_a_strip_size,
+        aliases=config.file_a_aliases,
     )
     _, dups_b, total_b, _ = _index_file(
         file_b,
@@ -97,6 +106,7 @@ def dry_run(file_a: Path, file_b: Path, config: EngineConfig) -> DryRunReport:
         config.segments_b,
         config.file_b_rdw,
         config.file_b_strip_size,
+        aliases=config.file_b_aliases,
     )
     return DryRunReport(
         file_a_records=total_a,
@@ -156,6 +166,8 @@ def run(
     parser_b = config.parser_b
     segments_a_cfg = config.segments_a
     segments_b_cfg = config.segments_b
+    aliases_a = config.file_a_aliases
+    aliases_b = config.file_b_aliases
     if (
         external_sort
         or not config.layout_a.sort.input_sorted
@@ -164,17 +176,18 @@ def run(
         file_a, file_b = _external_sort_inputs(file_a, file_b, config, filename_stamp)
         # The sorted temp copies are written by the engine without RDW or
         # leading-byte strip prefixes, so downstream passes must not try
-        # to skip them.
+        # to skip them. Aliases stay live since the sorted output still
+        # carries on-wire segment names.
         rdw_a = None
         rdw_b = None
         strip_a = 0
         strip_b = 0
 
     index_a, dups_a, total_a, segments_a = _index_file(
-        file_a, parser_a, segments_a_cfg, rdw_a, strip_a
+        file_a, parser_a, segments_a_cfg, rdw_a, strip_a, aliases=aliases_a
     )
     index_b, dups_b, total_b, segments_b = _index_file(
-        file_b, parser_b, segments_b_cfg, rdw_b, strip_b
+        file_b, parser_b, segments_b_cfg, rdw_b, strip_b, aliases=aliases_b
     )
     logger.info(
         "indexed: A=%d records (%d dup keys), B=%d records (%d dup keys)",
@@ -206,8 +219,8 @@ def run(
             for key in both_keys:
                 off_a, len_a = index_a[key]
                 off_b, len_b = index_b[key]
-                rec_a = _read_record_at(fh_a, off_a, len_a, parser_a, segments_a_cfg)
-                rec_b = _read_record_at(fh_b, off_b, len_b, parser_b, segments_b_cfg)
+                rec_a = _read_record_at(fh_a, off_a, len_a, parser_a, segments_a_cfg, aliases_a)
+                rec_b = _read_record_at(fh_b, off_b, len_b, parser_b, segments_b_cfg, aliases_b)
                 verdict = compare_records(rec_a, rec_b, normalizer, hasher)
 
                 if verdict.matched:
@@ -344,6 +357,8 @@ def run_parallel(
     parser_b = config.parser_b
     segments_a_cfg = config.segments_a
     segments_b_cfg = config.segments_b
+    aliases_a = config.file_a_aliases
+    aliases_b = config.file_b_aliases
     if (
         external_sort
         or not config.layout_a.sort.input_sorted
@@ -356,10 +371,10 @@ def run_parallel(
         strip_b = 0
 
     index_a, dups_a, total_a, segments_a = _index_file(
-        file_a, parser_a, segments_a_cfg, rdw_a, strip_a
+        file_a, parser_a, segments_a_cfg, rdw_a, strip_a, aliases=aliases_a
     )
     index_b, dups_b, total_b, segments_b = _index_file(
-        file_b, parser_b, segments_b_cfg, rdw_b, strip_b
+        file_b, parser_b, segments_b_cfg, rdw_b, strip_b, aliases=aliases_b
     )
     logger.info(
         "indexed: A=%d records (%d dup keys), B=%d records (%d dup keys)",
@@ -491,12 +506,55 @@ def run_parallel(
 # ---------------------------------------------------------------------------
 
 
+def _apply_aliases(record: Record, aliases: tuple[SegmentAlias, ...]) -> Record:
+    """Apply context-sensitive segment renames to a parsed record (ADR-034).
+
+    Walks the record's segments in order. The instant a segment named
+    ``alias.after_segment`` is seen, the alias is "armed" — every
+    subsequent segment named ``alias.wire_name`` in this record gets
+    renamed to ``alias.logical_name`` (raw bytes unchanged; only the
+    in-memory :attr:`Segment.name` differs).
+
+    Returns the original record unchanged when ``aliases`` is empty
+    or when no segment matched any rename rule — preserving the
+    no-aliases fast path's identity behavior.
+    """
+    if not aliases:
+        return record
+    armed: set[str] = set()
+    triggers = {a.after_segment for a in aliases}
+    wire_to_alias = {a.wire_name: a for a in aliases}
+    new_segments: list[Segment] = []
+    changed = False
+    for seg in record.segments:
+        if seg.name in triggers:
+            armed.add(seg.name)
+        alias = wire_to_alias.get(seg.name)
+        if alias is not None and alias.after_segment in armed:
+            new_segments.append(
+                Segment(name=alias.logical_name, size=seg.size, data=seg.data, offset=seg.offset)
+            )
+            changed = True
+        else:
+            new_segments.append(seg)
+    if not changed:
+        return record
+    return Record(
+        key=record.key,
+        segments=tuple(new_segments),
+        raw=record.raw,
+        offset=record.offset,
+        length=record.length,
+    )
+
+
 def _index_file(
     path: Path,
     parser_cfg: ParserConfig,
     segments_cfg: SegmentsConfig,
     rdw_cfg: RdwConfig | None,
     strip_size: int,
+    aliases: tuple[SegmentAlias, ...] = (),
 ) -> tuple[
     dict[str, tuple[int, int]],
     dict[str, list[tuple[int, int]]],
@@ -535,6 +593,7 @@ def _index_file(
         for record in iter_records(
             fh, parser_cfg, segments_cfg, rdw_cfg, strip_leading_bytes=strip_size
         ):
+            record = _apply_aliases(record, aliases)
             total_records += 1
             for seg in record.segments:
                 segment_counts[seg.name] += 1
@@ -557,19 +616,22 @@ def _read_record_at(
     length: int,
     parser_cfg: ParserConfig,
     segments_cfg: SegmentsConfig,
+    aliases: tuple[SegmentAlias, ...] = (),
 ) -> Record:
     """Seek to ``offset`` in ``stream`` and parse the record there.
 
     ``offset`` and ``length`` already point past any RDW or
     leading-byte strip (set during :func:`_index_file`), so no
-    additional prefix-skipping is needed here.
+    additional prefix-skipping is needed here. The configured
+    segment aliases are applied so the returned record carries the
+    same logical segment names as the records that the index pass saw.
     """
     stream.seek(offset)
     buf = stream.read(length)
     parsed = list(iter_records(io.BytesIO(buf), parser_cfg, segments_cfg))
     if not parsed:
         raise InputFileError(f"no record could be parsed at offset {offset} (length {length})")
-    return parsed[0]
+    return _apply_aliases(parsed[0], aliases)
 
 
 def _write_dups(

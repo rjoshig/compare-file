@@ -36,8 +36,9 @@ from typing import BinaryIO
 from segment_compare.comparator import compare_records
 from segment_compare.config import EngineConfig
 from segment_compare.hasher import build_hasher
+from segment_compare.layout import SegmentAlias
 from segment_compare.normalizer import FieldNormalizer
-from segment_compare.parser import ParserConfig, Record, SegmentsConfig, iter_records
+from segment_compare.parser import ParserConfig, Record, Segment, SegmentsConfig, iter_records
 from segment_compare.writer import OutputWriter
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,8 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
     parser_b = config.parser_b
     segments_a_cfg = config.segments_a
     segments_b_cfg = config.segments_b
+    aliases_a = config.file_a_aliases
+    aliases_b = config.file_b_aliases
 
     matched = 0
     mismatched = 0
@@ -141,8 +144,8 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
         for key in payload.keys:
             off_a, len_a = payload.offsets_a[key]
             off_b, len_b = payload.offsets_b[key]
-            rec_a = _read_record_at(fh_a, off_a, len_a, parser_a, segments_a_cfg)
-            rec_b = _read_record_at(fh_b, off_b, len_b, parser_b, segments_b_cfg)
+            rec_a = _read_record_at(fh_a, off_a, len_a, parser_a, segments_a_cfg, aliases_a)
+            rec_b = _read_record_at(fh_b, off_b, len_b, parser_b, segments_b_cfg, aliases_b)
             verdict = compare_records(rec_a, rec_b, normalizer, hasher)
 
             if verdict.matched:
@@ -184,16 +187,46 @@ def _read_record_at(
     length: int,
     parser_cfg: ParserConfig,
     segments_cfg: SegmentsConfig,
+    aliases: tuple[SegmentAlias, ...] = (),
 ) -> Record:
     """Seek to ``offset`` and parse the record sitting there.
 
     Mirrors ``pipeline._read_record_at`` so behavior is identical to
     the single-process path. ``offset``/``length`` already point past
-    any per-file RDW or leading-byte strip.
+    any per-file RDW or leading-byte strip; context-sensitive aliases
+    (ADR-034) are applied here so the worker sees the same logical
+    segment names the master saw during the index pass.
     """
     stream.seek(offset)
     buf = stream.read(length)
     parsed = list(iter_records(io.BytesIO(buf), parser_cfg, segments_cfg))
     if not parsed:
         raise RuntimeError(f"no record at offset {offset} (length {length}) in worker slice")
-    return parsed[0]
+    record = parsed[0]
+    if not aliases:
+        return record
+    armed: set[str] = set()
+    triggers = {a.after_segment for a in aliases}
+    wire_to_alias = {a.wire_name: a for a in aliases}
+    new_segments: list[Segment] = []
+    changed = False
+    for seg in record.segments:
+        if seg.name in triggers:
+            armed.add(seg.name)
+        alias = wire_to_alias.get(seg.name)
+        if alias is not None and alias.after_segment in armed:
+            new_segments.append(
+                Segment(name=alias.logical_name, size=seg.size, data=seg.data, offset=seg.offset)
+            )
+            changed = True
+        else:
+            new_segments.append(seg)
+    if not changed:
+        return record
+    return Record(
+        key=record.key,
+        segments=tuple(new_segments),
+        raw=record.raw,
+        offset=record.offset,
+        length=record.length,
+    )

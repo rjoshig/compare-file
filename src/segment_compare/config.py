@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from segment_compare.layout import FileLayout, LayoutError, load_file_layout
+from segment_compare.layout import FileLayout, LayoutError, SegmentAlias, load_file_layout
 from segment_compare.normalizer import FieldDef, FieldNormalizationRule
 from segment_compare.parser import ParserConfig, RdwConfig, SegmentsConfig
 
@@ -155,6 +155,16 @@ class EngineConfig:
     def file_b_strip_size(self) -> int:
         """File B's per-record leading-byte strip, or 0 if absent."""
         return self.layout_b.strip_leading_bytes.size if self.layout_b.strip_leading_bytes else 0
+
+    @property
+    def file_a_aliases(self) -> tuple[SegmentAlias, ...]:
+        """File A's context-sensitive segment-rename rules (ADR-034)."""
+        return self.layout_a.segment_aliases
+
+    @property
+    def file_b_aliases(self) -> tuple[SegmentAlias, ...]:
+        """File B's context-sensitive segment-rename rules (ADR-034)."""
+        return self.layout_b.segment_aliases
 
     @property
     def known_segments(self) -> tuple[str, ...]:
