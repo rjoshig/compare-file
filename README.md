@@ -117,12 +117,18 @@ compare-file/
 
 ## Documentation
 
+- **`docs/how-it-works.md` — engine walkthrough** (parse → index →
+  normalize → hash → compare, with byte-level examples; reliability
+  analysis with collision math; O(n) complexity argument). Read
+  this first if you want to understand or trust the engine.
 - `CLAUDE.md` — workflow and conventions
 - `docs/architecture.md` — system design
 - `docs/phase-plan.md` — phase-by-phase roadmap
 - `docs/phase-1.md` … `phase-4.md` — detailed per-phase plans
-- `docs/decisions.md` — architectural decision records
+- `docs/decisions.md` — architectural decision records (30 ADRs)
+- `docs/benchmarks/phase-2.md` — measured 3M-record performance
 - `docs/session-log.md` — working journal
+- `examples/README.md` — sample-file format reference
 
 ## License
 
