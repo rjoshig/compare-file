@@ -1,0 +1,16 @@
+{
+  "$comment": "Runtime behavior knobs. Phase 1 only honors hash_method, blake2b_digest_size, input_sorted, sort_temp_dir, chunk_size, key_type, and key_sort_order. parallel_workers and partition_strategy are reserved for Phase 2.",
+
+  "hash_method": "blake2b",
+  "blake2b_digest_size": 16,
+
+  "input_sorted": true,
+  "sort_temp_dir": "/tmp/segment_compare",
+
+  "parallel_workers": 1,
+  "chunk_size": 10000,
+  "partition_strategy": "equal_count",
+
+  "key_type": "alphanumeric",
+  "key_sort_order": "ascending"
+}
