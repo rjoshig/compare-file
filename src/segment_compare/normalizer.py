@@ -14,11 +14,23 @@ contract so the comparator and pipeline are agnostic (ADR-007).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Protocol
 
 from segment_compare.config import NormalizationRule
 
 RecordSource = Literal["A", "B"]
+
+
+class Normalizer(Protocol):
+    """Maps a segment's raw data to its canonical comparable bytes.
+
+    All normalizers (position-based in Phase 1, field-based in Phase 2)
+    share this contract so the comparator and pipeline are agnostic.
+    """
+
+    def normalize(self, segment_name: str, raw_data: bytes, source: RecordSource) -> bytes:
+        """Return the canonical bytes for one segment instance."""
+        ...
 
 
 class PositionNormalizer:
