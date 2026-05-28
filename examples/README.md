@@ -152,6 +152,122 @@ The stock `config/` directory already targets this layout:
 These config changes are tracked separately — see the next session log
 entry once they land.
 
+---
+
+## Supplementary fixture — `sample2_a.dat` / `sample2_b.dat`
+
+A richer second fixture (15 records in each file) that exercises:
+
+- **Variable TR01 count per record** — records carry 2, 3, or 4
+  TR01 instances. (The primary fixture has 3 except for K005 which
+  has 4.)
+- **An additional `AD01` (address) segment** placed between `NM01`
+  and the TR01 stream.
+- **More diverse `CL01` timestamps** including a non-default
+  `20240615` value that's identical in A and B (vs the K010
+  `20250101` vs `20250709` exclude scenario).
+- **Combined-mismatch records** — K014 mismatches on **both** `NM01`
+  and `AD01` at once, producing two `report.csv` rows for one key.
+
+This fixture is **not** the canonical phase-1 oracle (that's
+`sample_a.dat` / `sample_b.dat`); it's a supplementary fixture you
+can run the engine against to inspect more scenarios in one go. No
+pytest assertion currently pins these counts — point the CLI at it
+manually.
+
+### AD01 layout
+
+`AD01059` segments carry a 52-byte data area:
+
+```
+AD01059 "123 MAIN ST                   NEW YORK       NY10001"
+        |---------- street 30 ----------|--- city 15 --|st| zip5|
+```
+
+| Field  | Width | Notes                         |
+|--------|-------|-------------------------------|
+| street | 30    | space-padded right            |
+| city   | 15    | space-padded right            |
+| state  | 2     | USPS abbreviation (no spaces) |
+| zip    | 5     | 5-digit US ZIP (no +4)        |
+
+### Segment order per record
+
+```
+TU4R030  SH01035  NM01057  AD01059  TR01050 (×2-4)  SC01034 (×2)  CL01067  ENDS010
+```
+
+Record total bytes (header+data+newline):
+- 2 TR01s → **427** bytes on the wire
+- 3 TR01s → **477** bytes on the wire
+- 4 TR01s → **527** bytes on the wire
+
+### sample2_a.dat — 15 records, 7155 bytes
+
+| Line | Key       | TR01 ct | Scenario                                  |
+|------|-----------|---------|-------------------------------------------|
+| 1    | KEY...001 | 3       | match                                     |
+| 2    | KEY...002 | 2       | multiset reorder (B has T2, T1)           |
+| 3    | KEY...003 | 3       | NM01 mismatch (CAROL vs CAROLINE in B)    |
+| 4    | KEY...004 | 4       | TR01 content mismatch (B has T1_MOD)      |
+| 5    | KEY...005 | 4       | TR01 count mismatch (B has 2)             |
+| 6    | KEY...006 | 3       | AD01 mismatch (different street in B)     |
+| 7    | KEY...007 | 3       | only in A                                 |
+| 8    | KEY...008 | 2       | dup A (1/2)                               |
+| 9    | KEY...008 | 2       | dup A (2/2)                               |
+| 10   | KEY...010 | 3       | CL01 timestamp 20250101 (B has 20250709)  |
+| 11   | KEY...011 | 4       | match                                     |
+| 12   | KEY...013 | 2       | match                                     |
+| 13   | KEY...014 | 3       | **NM01 + AD01** both mismatch             |
+| 14   | KEY...015 | 4       | only in A                                 |
+| 15   | KEY...017 | 3       | match (shared timestamp 20240615)         |
+
+### sample2_b.dat — 15 records, 6955 bytes
+
+| Line | Key       | TR01 ct | Scenario                                  |
+|------|-----------|---------|-------------------------------------------|
+| 1    | KEY...001 | 3       | match                                     |
+| 2    | KEY...002 | 2       | reordered TR01s                           |
+| 3    | KEY...003 | 3       | NM01 mismatch                             |
+| 4    | KEY...004 | 4       | TR01 content mismatch                     |
+| 5    | KEY...005 | 2       | TR01 count mismatch                       |
+| 6    | KEY...006 | 3       | AD01 mismatch                             |
+| 7    | KEY...009 | 2       | dup B (1/2)                               |
+| 8    | KEY...009 | 2       | dup B (2/2)                               |
+| 9    | KEY...010 | 3       | CL01 timestamp 20250709 → match w/ exclude|
+| 10   | KEY...011 | 4       | match                                     |
+| 11   | KEY...012 | 3       | only in B                                 |
+| 12   | KEY...013 | 2       | match                                     |
+| 13   | KEY...014 | 3       | NM01 + AD01 mismatch                      |
+| 14   | KEY...016 | 2       | only in B                                 |
+| 15   | KEY...017 | 3       | match (shared timestamp 20240615)         |
+
+### Expected outcome
+
+| Output             | Count | Keys                                |
+|--------------------|-------|-------------------------------------|
+| `matches.dat`      | 6     | KEY...001, 002, 010, 011, 013, 017  |
+| `mismatches.dat`   | 5     | KEY...003, 004, 005, 006, 014       |
+| `keymismatch_A.dat`| 2     | KEY...007, 015                      |
+| `keymismatch_B.dat`| 2     | KEY...012, 016                      |
+| `dups_A.dat`       | 2     | both rows of KEY...008              |
+| `dups_B.dat`       | 2     | both rows of KEY...009              |
+| `report.csv`       | 6 rows| K003 NM01, K004 TR01 content, K005 TR01 count (4↔2), K006 AD01, K014 AD01, K014 NM01 |
+
+Run it:
+
+```bash
+python -m segment_compare \
+    --file-a examples/sample2_a.dat \
+    --file-b examples/sample2_b.dat \
+    --config-dir config/ \
+    --output-dir results2/
+```
+
+Exit code is `1` (mismatches present).
+
+---
+
 ## Why this design
 
 - **Production-shaped**: every segment carries data that resembles
