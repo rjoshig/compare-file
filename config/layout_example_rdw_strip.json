@@ -1,0 +1,96 @@
+{
+  "$comment": "Example layout demonstrating BOTH per-record prefixes: a 5-byte opaque leading-byte strip + a 4-byte mainframe-style RDW (rdw1=2 bytes, rdw2=2 bytes, binary little-endian uint). Order on the wire is: [strip_leading_bytes (5)][rdw (4)][TU4R...][segments...][ENDS][delimiter]. The engine consumes 9 leading bytes per record before it sees the first segment header. Segment definitions mirror the realistic fixture (examples/sample_a.dat layouts) so you can drop this in as a layout_file_A.json variant when the source feed wraps each record in these prefixes. Set 'strip_leading_bytes' or 'rdw' to null individually to opt out of either prefix; the on-wire bytes the engine actually parses (TU4R..ENDS) are unchanged.",
+
+  "file_format": {
+    "segment_name_bytes":   4,
+    "size_field_bytes":     3,
+    "size_encoding":        "ascii_int",
+    "size_includes_header": true,
+    "data_encoding":        "ascii",
+    "record_delimiter":     "\n"
+  },
+
+  "strip_leading_bytes": {
+    "$comment": "5 opaque bytes consumed at the head of each record, before RDW. Common use: a block-control word from upstream that the engine doesn't need to interpret. 'encoding' is informational only; the engine reads size raw bytes and discards them.",
+    "size": 5,
+    "encoding": "binary"
+  },
+
+  "rdw": {
+    "$comment": "Classic mainframe RDW: 2-byte length + 2-byte reserved, unsigned little-endian uint. Total 4 bytes consumed per record after strip_leading_bytes and before TU4R. Engine does not validate rdw1 against the actual record length — the bytes are simply skipped.",
+    "rdw1_bytes": 2,
+    "rdw2_bytes": 2,
+    "encoding": "binary_le_uint"
+  },
+
+  "sort": {
+    "input_sorted": true,
+    "order":        "ascending",
+    "key_type":     "alphanumeric"
+  },
+
+  "segments": [
+    {
+      "name": "TU4R",
+      "role": "key",
+      "size": 30,
+      "fields": [
+        { "name": "data_prefix",   "length": 4,  "exclude": true              },
+        { "name": "account_nbr",   "length": 12, "key":     true              },
+        { "name": "source_branch", "length": 7                                }
+      ]
+    },
+    {
+      "name": "SH01",
+      "size": 35,
+      "fields": [
+        { "name": "status_block", "length": 11                                },
+        { "name": "padding",      "length": 17, "exclude": true               }
+      ]
+    },
+    {
+      "name": "NM01",
+      "size": 57,
+      "fields": [
+        { "name": "first_name",  "length": 20                                 },
+        { "name": "middle_name", "length": 15                                 },
+        { "name": "last_name",   "length": 15                                 }
+      ]
+    },
+    {
+      "name": "TR01",
+      "size": 50,
+      "fields": [
+        { "name": "txn_prefix", "length": 27                                  },
+        { "name": "txn_ref",    "length": 10                                  },
+        { "name": "padding",    "length": 6,  "exclude": true                 }
+      ]
+    },
+    {
+      "name": "SC01",
+      "size": 34,
+      "fields": [
+        { "name": "score_code", "length": 10                                  },
+        { "name": "padding",    "length": 17, "exclude": true                 }
+      ]
+    },
+    {
+      "name": "CL01",
+      "size": 67,
+      "fields": [
+        { "name": "classifier",  "length": 11                                 },
+        { "name": "opened_date", "length": 8,  "exclude": true                },
+        { "name": "status_flag", "length": 2                                  },
+        { "name": "padding",     "length": 39, "exclude": true                }
+      ]
+    },
+    {
+      "name": "ENDS",
+      "role": "end",
+      "size": 10,
+      "fields": [
+        { "name": "segment_count", "length": 3,  "exclude": true              }
+      ]
+    }
+  ]
+}

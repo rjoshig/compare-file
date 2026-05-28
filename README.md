@@ -352,6 +352,7 @@ compare-file/
 ├── config/
 │   ├── layout_file_A.json                 # File A: format + segments + fields + RDW + sort (ADR-033)
 │   ├── layout_file_B.json                 # File B: same shape as A; differs where the inputs differ
+│   ├── layout_example_rdw_strip.json      # example: per-record strip_leading_bytes (5) + RDW (4) prefixes
 │   └── runtime.json                       # hash method, workers, chunk size, sort temp dir
 ├── docs/
 │   ├── architecture.md

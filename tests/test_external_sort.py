@@ -13,6 +13,12 @@ from segment_compare.parser import iter_records
 from segment_compare.pipeline import run
 from segment_compare.writer import stamped_filename
 
+from tests._helpers import (
+    make_synthetic_record,
+    minimal_layout,
+    write_minimal_config_dir,
+)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO_ROOT / "config"
 EXAMPLES = REPO_ROOT / "examples"
@@ -264,3 +270,145 @@ def test_summary_records_original_input_paths_not_sorted_temp_paths(
     assert summary.file_b_path == shuffled_b
     assert summary.file_a_size_bytes == shuffled_a.stat().st_size
     assert summary.file_b_size_bytes == shuffled_b.stat().st_size
+
+
+# ---------------------------------------------------------------------------
+# Sort path respects per-record prefixes (RDW + strip_leading_bytes)
+#
+# These tests prove the engine consumes the configured per-record prefixes
+# during the spill pass and produces prefix-less sorted output. Without them,
+# the rdw / strip_leading_bytes + sort combination was untested end-to-end —
+# the rdw-only test runs in single-process mode and the existing sort tests
+# use the realistic fixture which carries no prefixes.
+# ---------------------------------------------------------------------------
+
+
+def _wrap_with_le_rdw(records: list[bytes]) -> bytes:
+    """Prepend a 4-byte LE-uint RDW (low 2 bytes = length, high 2 bytes = 0) to each record."""
+    out = bytearray()
+    for rec in records:
+        length = len(rec)
+        out += length.to_bytes(2, "little") + b"\x00\x00" + rec + b"\n"
+    return bytes(out)
+
+
+def _wrap_with_strip(records: list[bytes], strip: bytes) -> bytes:
+    """Prepend the same opaque strip prefix before every record."""
+    out = bytearray()
+    for rec in records:
+        out += strip + rec + b"\n"
+    return bytes(out)
+
+
+def test_external_sort_respects_rdw_when_input_has_rdw_prefix(tmp_path: Path) -> None:
+    """RDW + input_sorted=false: sort must consume the 4-byte RDW from each input record.
+
+    File A's records are shuffled and wrapped with a 4-byte RDW per
+    record. The layout declares the RDW and `input_sorted=false` so the
+    external-sort path fires. After the sort, all three keys should
+    appear as matches against an identically-shuffled File B.
+    """
+    keys_shuffled = ["KEY000000003", "KEY000000001", "KEY000000002"]
+    records = [make_synthetic_record(k) for k in keys_shuffled]
+    a_payload = _wrap_with_le_rdw(records)
+    b_payload = _wrap_with_le_rdw(records)
+    (tmp_path / "a.dat").write_bytes(a_payload)
+    (tmp_path / "b.dat").write_bytes(b_payload)
+
+    layout = minimal_layout()
+    layout["rdw"] = {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"}
+    layout["sort"]["input_sorted"] = False  # forces the external sort
+    cfg_dir = write_minimal_config_dir(tmp_path, layout_a=layout, layout_b=layout)
+
+    summary = run(
+        tmp_path / "a.dat",
+        tmp_path / "b.dat",
+        load_config(cfg_dir),
+        tmp_path / "out",
+        run_timestamp=FIXED_TS,
+    )
+    assert summary.file_a_record_count == 3
+    assert summary.file_b_record_count == 3
+    assert summary.records_matched == 3
+    assert summary.records_mismatched == 0
+
+
+def test_external_sort_respects_strip_leading_bytes_when_input_has_strip(
+    tmp_path: Path,
+) -> None:
+    """strip + input_sorted=false: sort must consume the opaque strip from each record."""
+    keys_shuffled = ["KEY000000003", "KEY000000001", "KEY000000002"]
+    records = [make_synthetic_record(k) for k in keys_shuffled]
+    a_payload = _wrap_with_strip(records, strip=b"\xff\xee\xdd\xcc\xbb")
+    b_payload = _wrap_with_strip(records, strip=b"\xff\xee\xdd\xcc\xbb")
+    (tmp_path / "a.dat").write_bytes(a_payload)
+    (tmp_path / "b.dat").write_bytes(b_payload)
+
+    layout = minimal_layout()
+    layout["strip_leading_bytes"] = {"size": 5, "encoding": "binary"}
+    layout["sort"]["input_sorted"] = False
+    cfg_dir = write_minimal_config_dir(tmp_path, layout_a=layout, layout_b=layout)
+
+    summary = run(
+        tmp_path / "a.dat",
+        tmp_path / "b.dat",
+        load_config(cfg_dir),
+        tmp_path / "out",
+        run_timestamp=FIXED_TS,
+    )
+    assert summary.records_matched == 3
+    assert summary.records_mismatched == 0
+
+
+def test_external_sort_respects_strip_and_rdw_together(tmp_path: Path) -> None:
+    """Both per-record prefixes set: sort must consume 5 (strip) + 4 (rdw) = 9 bytes per record."""
+    keys_shuffled = ["KEY000000003", "KEY000000001", "KEY000000002"]
+    records = [make_synthetic_record(k) for k in keys_shuffled]
+
+    def _wrap_both(records: list[bytes]) -> bytes:
+        strip = b"\xaa\xbb\xcc\xdd\xee"
+        out = bytearray()
+        for rec in records:
+            length = len(rec)
+            out += strip + length.to_bytes(2, "little") + b"\x00\x00" + rec + b"\n"
+        return bytes(out)
+
+    (tmp_path / "a.dat").write_bytes(_wrap_both(records))
+    (tmp_path / "b.dat").write_bytes(_wrap_both(records))
+
+    layout = minimal_layout()
+    layout["strip_leading_bytes"] = {"size": 5, "encoding": "binary"}
+    layout["rdw"] = {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"}
+    layout["sort"]["input_sorted"] = False
+    cfg_dir = write_minimal_config_dir(tmp_path, layout_a=layout, layout_b=layout)
+
+    summary = run(
+        tmp_path / "a.dat",
+        tmp_path / "b.dat",
+        load_config(cfg_dir),
+        tmp_path / "out",
+        run_timestamp=FIXED_TS,
+    )
+    assert summary.records_matched == 3
+    assert summary.records_mismatched == 0
+
+
+def test_external_sort_with_rdw_explicit_flag_also_works(tmp_path: Path) -> None:
+    """Same as the input_sorted=false case but triggered by external_sort=True instead."""
+    records = [make_synthetic_record(k) for k in ("KEY000000002", "KEY000000001")]
+    (tmp_path / "a.dat").write_bytes(_wrap_with_le_rdw(records))
+    (tmp_path / "b.dat").write_bytes(_wrap_with_le_rdw(records))
+
+    layout = minimal_layout()
+    layout["rdw"] = {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"}
+    cfg_dir = write_minimal_config_dir(tmp_path, layout_a=layout, layout_b=layout)
+
+    summary = run(
+        tmp_path / "a.dat",
+        tmp_path / "b.dat",
+        load_config(cfg_dir),
+        tmp_path / "out",
+        run_timestamp=FIXED_TS,
+        external_sort=True,
+    )
+    assert summary.records_matched == 2
