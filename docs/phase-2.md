@@ -5,8 +5,11 @@ layout differences via field-based normalization.
 
 ## Acceptance criteria
 
-1. 3M-record synthetic comparison completes within an agreed throughput
-   target (set at Phase 2 kickoff after a Phase 1 baseline measurement).
+1. **3M-record synthetic comparison completes in ≤ 90 s on 4 workers**
+   (≥ 2.5× speedup over the 228.8 s single-process baseline) **with
+   peak RSS ≤ 4 GiB**. Targets agreed at Phase 2 kickoff after
+   the baseline measurement. See `docs/benchmarks/phase-2.md` for
+   raw numbers.
 2. Equal-count partitioning across N workers produces identical output
    to the single-process Phase 1 engine on the same inputs.
 3. Field-level normalization config produces identical output to an
@@ -16,6 +19,23 @@ layout differences via field-based normalization.
 5. Optional `--external-sort` path handles unsorted input.
 6. Benchmark report committed in `docs/benchmarks/phase-2.md` covering
    wall time, peak memory, throughput across worker counts 1, 2, 4, 8.
+
+## Baseline (single-process, before parallelism)
+
+Measured on `tests/fixtures/synth_003000000_seed42_*.dat` (1.34 GiB
+per file, ~2.95M records each) via `tests/synthetic_data.py`. Run on
+pyenv 3.12.7, default `config/`, blake2b hashing, sorted input.
+
+| Metric             | Value          |
+|--------------------|----------------|
+| Wall time          | **228.8 s**    |
+| Peak RSS           | **1,959 MiB**  |
+| Total records      | 5,909,885      |
+| Records/sec        | 25,826         |
+
+All six aggregate counts (matches, mismatches, only_a, only_b,
+dups_a, dups_b) match the generator's `ExpectedCounts` exactly,
+confirming engine correctness at scale.
 
 ## Track A — Performance
 
