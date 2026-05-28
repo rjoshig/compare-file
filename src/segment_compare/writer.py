@@ -285,9 +285,7 @@ class OutputWriter:
     def finalize(self, summary: Summary) -> None:
         """Write ``summary.json`` and close all handles."""
         summary_path = self._output_dir / self._on_disk(SUMMARY_FILE)
-        with summary_path.open("w", encoding="utf-8") as fh:
-            json.dump(_summary_to_json(summary), fh, indent=2, sort_keys=True)
-            fh.write("\n")
+        write_summary(summary, summary_path)
         self.close()
 
     # ------------------------------------------------------------------
@@ -312,3 +310,15 @@ def _summary_to_json(summary: Summary) -> dict[str, object]:
     out["file_b_path"] = str(summary.file_b_path)
     out["per_segment"] = [asdict(s) for s in summary.per_segment]
     return out
+
+
+def write_summary(summary: Summary, path: Path) -> None:
+    """Write a :class:`Summary` to ``path`` in the canonical JSON form.
+
+    Used by :meth:`OutputWriter.finalize` and by the parallel
+    pipeline's master process (which has no live :class:`OutputWriter`
+    by the time it has all the data it needs to build a summary).
+    """
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(_summary_to_json(summary), fh, indent=2, sort_keys=True)
+        fh.write("\n")

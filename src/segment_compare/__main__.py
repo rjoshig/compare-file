@@ -27,7 +27,7 @@ from pathlib import Path
 from segment_compare import __version__
 from segment_compare.config import ConfigError, load_config
 from segment_compare.parser import ParseError
-from segment_compare.pipeline import InputFileError, dry_run, run
+from segment_compare.pipeline import InputFileError, dry_run, run, run_parallel
 
 EXIT_OK = 0
 EXIT_MISMATCHES = 1
@@ -86,7 +86,12 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
 
     try:
-        summary = run(args.file_a, args.file_b, config, args.output_dir)
+        if args.workers > 1:
+            summary = run_parallel(
+                args.file_a, args.file_b, config, args.output_dir, workers=args.workers
+            )
+        else:
+            summary = run(args.file_a, args.file_b, config, args.output_dir)
     except InputFileError as exc:
         sys.stderr.write(f"input error: {exc}\n")
         return EXIT_INPUT_NOT_FOUND
@@ -141,6 +146,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         help="Directory to write the eight output files into (created if missing).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of worker processes (default: 1, single-process Phase 1 "
+            "path). Values >1 invoke the Phase 2 parallel pipeline. Output "
+            "is byte-identical to the single-process run modulo timings."
+        ),
     )
     parser.add_argument(
         "--log-level",

@@ -32,12 +32,23 @@ from pathlib import Path
 from typing import BinaryIO
 
 from segment_compare import __version__
+from concurrent.futures import ProcessPoolExecutor
 from segment_compare.comparator import compare_records
 from segment_compare.config import ResolvedConfig
 from segment_compare.hasher import build_hasher
+from segment_compare.merger import fold_partial_summaries, merge_worker_outputs
 from segment_compare.normalizer import PositionNormalizer
 from segment_compare.parser import Record, iter_records
-from segment_compare.writer import STAMP_FORMAT, OutputWriter, SegmentSummary, Summary
+from segment_compare.partitioner import equal_count_partition
+from segment_compare.worker import WorkerPayload, WorkerResult, run_worker
+from segment_compare.writer import (
+    STAMP_FORMAT,
+    OutputWriter,
+    SegmentSummary,
+    Summary,
+    stamped_filename,
+    write_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +226,188 @@ def run(
         records_mismatched,
         len(only_a_keys) + len(only_b_keys),
         elapsed,
+    )
+    return summary
+
+
+def run_parallel(
+    file_a: Path,
+    file_b: Path,
+    config: ResolvedConfig,
+    output_dir: Path,
+    workers: int,
+    run_timestamp: datetime | None = None,
+) -> Summary:
+    """Multi-worker variant of :func:`run`.
+
+    Sequence:
+
+    1. Master builds the key→offset index for File A and File B
+       (single-process; this stage dominates the pre-join time).
+    2. Master partitions the sorted inner-join key set across
+       ``workers`` workers (equal-count partitioning, ADR-006).
+    3. Master writes orphan-key records and duplicate-key records
+       directly to ``keymismatch_*.dat`` / ``dups_*.dat`` (cheap;
+       these don't go through the join loop).
+    4. Workers each process their key slice in a child process,
+       writing per-worker ``matches.dat`` / ``mismatches.dat`` /
+       ``report.csv`` under ``<output_dir>/_workers/w<wid>/``.
+    5. Master concatenates per-worker outputs into the stamped
+       run-level files and folds partial summaries into the global
+       :class:`Summary`.
+
+    Produces output byte-identical to :func:`run` when invoked with
+    the same inputs (acceptance criterion #2). Differences in
+    ``elapsed_seconds`` / ``throughput_records_per_sec`` /
+    ``start_time`` / ``end_time`` are expected.
+
+    Args:
+        workers: Number of worker processes to spawn. Must be ≥ 1.
+            Passing 1 still goes through this parallel path (useful
+            for benchmarking the orchestration overhead); use
+            :func:`run` directly for the truly single-process path.
+        run_timestamp: Optional filename-stamp source. See
+            :func:`run` for semantics.
+
+    Raises:
+        InputFileError: Either input file does not exist.
+        ValueError: ``workers < 1``.
+    """
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
+    for path in (file_a, file_b):
+        if not path.exists():
+            raise InputFileError(f"input file does not exist: {path}")
+
+    start_time = datetime.now(timezone.utc)
+    filename_stamp = (run_timestamp or start_time).strftime(STAMP_FORMAT)
+    logger.info(
+        "starting parallel comparison: %s vs %s (workers=%d, stamp=%s)",
+        file_a,
+        file_b,
+        workers,
+        filename_stamp,
+    )
+
+    index_a, dups_a, total_a, segments_a = _index_file(file_a, config)
+    index_b, dups_b, total_b, segments_b = _index_file(file_b, config)
+    logger.info(
+        "indexed: A=%d records (%d dup keys), B=%d records (%d dup keys)",
+        total_a,
+        len(dups_a),
+        total_b,
+        len(dups_b),
+    )
+
+    keys_a = set(index_a)
+    keys_b = set(index_b)
+    only_a_keys = sorted(keys_a - keys_b)
+    only_b_keys = sorted(keys_b - keys_a)
+    both_keys = sorted(keys_a & keys_b)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    workers_root = output_dir / "_workers"
+
+    # Master-owned outputs (orphans + dups). Written single-process via the
+    # normal OutputWriter; matches/mismatches/report stay empty in the master
+    # writer because those come from workers and are merged in afterwards.
+    with OutputWriter(output_dir, config.segments, filename_stamp=filename_stamp) as master_writer:
+        _write_dups(file_a, dups_a, config, master_writer.write_dup_a)
+        _write_dups(file_b, dups_b, config, master_writer.write_dup_b)
+        _write_key_only(file_a, only_a_keys, index_a, config, master_writer.write_key_only_a)
+        _write_key_only(file_b, only_b_keys, index_b, config, master_writer.write_key_only_b)
+        # Drop the master's empty matches.dat / mismatches.dat / report.csv;
+        # the merger overwrites these paths anyway, but deleting now keeps
+        # the on-disk state coherent if a worker crashes before merging.
+        master_writer.path_for("matches.dat").unlink(missing_ok=True)
+        master_writer.path_for("mismatches.dat").unlink(missing_ok=True)
+        master_writer.path_for("report.csv").unlink(missing_ok=True)
+        # summary.json is written below, after the merge.
+        master_writer.path_for("summary.json").unlink(missing_ok=True)
+
+    # Build payloads and spawn workers.
+    chunks = equal_count_partition(both_keys, workers)
+    payloads: list[WorkerPayload] = []
+    for wid, chunk in enumerate(chunks):
+        worker_dir = workers_root / f"w{wid}"
+        payloads.append(
+            WorkerPayload(
+                worker_id=wid,
+                keys=tuple(chunk),
+                offsets_a={k: index_a[k] for k in chunk},
+                offsets_b={k: index_b[k] for k in chunk},
+                file_a=file_a,
+                file_b=file_b,
+                config=config,
+                worker_output_dir=worker_dir,
+            )
+        )
+
+    if workers == 1:
+        # Run the single worker inline. ProcessPoolExecutor with max_workers=1
+        # would also work but adds spawn overhead with no parallelism benefit.
+        results: list[WorkerResult] = [run_worker(payloads[0])]
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(run_worker, payloads))
+
+    # Merge per-worker outputs into the stamped run outputs.
+    worker_dirs = [workers_root / f"w{wid}" for wid in range(workers)]
+    merge_worker_outputs(worker_dirs, output_dir, filename_stamp)
+
+    records_matched, records_mismatched, per_seg_match, per_seg_mismatch = fold_partial_summaries(
+        results
+    )
+
+    end_time = datetime.now(timezone.utc)
+    elapsed = (end_time - start_time).total_seconds()
+    total_processed = total_a + total_b
+    throughput = total_processed / elapsed if elapsed > 0 else 0.0
+
+    per_segment = _build_per_segment_summary(
+        per_seg_match, per_seg_mismatch, segments_a, segments_b
+    )
+
+    summary = Summary(
+        file_a_path=file_a,
+        file_b_path=file_b,
+        file_a_size_bytes=file_a.stat().st_size,
+        file_b_size_bytes=file_b.stat().st_size,
+        file_a_record_count=total_a,
+        file_b_record_count=total_b,
+        keys_in_a_only=len(only_a_keys),
+        keys_in_b_only=len(only_b_keys),
+        keys_in_both=len(both_keys),
+        dups_in_a=sum(len(v) for v in dups_a.values()),
+        dups_in_b=sum(len(v) for v in dups_b.values()),
+        records_matched=records_matched,
+        records_mismatched=records_mismatched,
+        per_segment=per_segment,
+        start_time=start_time.isoformat(),
+        end_time=end_time.isoformat(),
+        elapsed_seconds=elapsed,
+        throughput_records_per_sec=throughput,
+        config_paths={k: str(v) for k, v in config.paths.items()},
+        config_audit_hash=config.audit_hash,
+        engine_version=__version__,
+        filename_stamp=filename_stamp,
+    )
+
+    # Write summary.json (under the run output dir, stamped).
+    write_summary(summary, output_dir / stamped_filename("summary.json", filename_stamp))
+
+    # Optional: clean up the per-worker scratch dir. Leave it for now so
+    # debugging is easier; a future ADR can flip this once the path is
+    # stable.
+
+    logger.info(
+        "parallel comparison complete: %d matched, %d mismatched, %d orphans, "
+        "elapsed=%.3fs across %d workers",
+        records_matched,
+        records_mismatched,
+        len(only_a_keys) + len(only_b_keys),
+        elapsed,
+        workers,
     )
     return summary
 
