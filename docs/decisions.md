@@ -726,3 +726,87 @@ points:
 - The Phase 2 test suite verifies the sort path produces engine
   output byte-identical to the sorted-input baseline (counts,
   ``*.dat`` outputs, ``report.csv``).
+
+---
+
+## ADR-031 — Per-file Record Descriptor Word (RDW) prefix is configurable, not parsed
+
+**Status:** accepted
+
+**Context:** Real-world inputs sometimes prepend a small fixed prefix to
+every record before the key segment. Mainframe extracts are the most
+common source — the classic RDW is a 4-byte header
+(2-byte length + 2-byte reserved) sitting in front of each record. The
+user surfaced this with a file that looks like
+``[rdw1][rdw2][TU4R]…[ENDS]`` rather than ``[TU4R]…[ENDS]`` from byte
+zero. Either File A, File B, or both may carry such a prefix; the two
+sides can use different widths and encodings.
+
+The user explicitly does *not* need the engine to interpret the RDW
+values — the prefix is purely a framing artifact. The job is to skip it
+cleanly so the rest of the record parses as today.
+
+**Decision:** Add an optional per-file ``rdw`` block to
+``segments.json::parser``:
+
+```json
+"parser": {
+  "file_a": {"rdw": {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"}},
+  "file_b": {"rdw": {"rdw1_bytes": 2, "rdw2_bytes": 3, "encoding": "ascii_int"}}
+}
+```
+
+- Either block (or both) may be omitted; absent means "no RDW prefix on
+  this side".
+- ``rdw1_bytes`` and ``rdw2_bytes`` must both be > 0. The engine skips
+  exactly ``rdw1_bytes + rdw2_bytes`` raw bytes before each record's
+  key segment.
+- ``encoding`` is one of ``"ascii_int"`` (zero-padded ASCII decimal) or
+  ``"binary_le_uint"`` (unsigned little-endian integer). Stored on
+  :class:`RdwConfig` for diagnostics; the skip path is encoding-
+  agnostic. Future validation work (e.g., assert rdw1 equals the
+  record's actual length) can lift this field without a schema change.
+- Length validation is **out of scope** for this ADR. If the prefix
+  lies about the record length, the engine still parses normally; the
+  layout of the record bytes themselves is what matters.
+
+Parser surface: ``iter_records(stream, parser_cfg, segments_cfg,
+rdw_cfg=None)``. When ``rdw_cfg`` is set, the parser consumes
+``rdw_cfg.total_bytes`` at the head of each iteration; a truncated RDW
+raises :class:`ParseError`. ``Record.offset`` and ``Record.length`` are
+reported *relative to the key segment*, so seeking back to a record by
+``(offset, length)`` does **not** need to re-skip the RDW — the
+single-record read path in pipeline / worker stays uniform.
+
+Pipeline wiring:
+
+- ``pipeline.run`` / ``pipeline.run_parallel`` read
+  ``config.file_a_rdw`` / ``config.file_b_rdw`` and thread the right
+  RDW into each per-file ``_index_file`` and ``external_sort_file``
+  call.
+- The external-sort pass strips the prefix on its way through; sorted
+  temp copies never carry an RDW, so the post-sort indexing pass is
+  called with ``rdw_cfg=None``. ``summary.json`` still records the
+  *original* input paths (ADR-030 contract).
+- Workers do not need RDW awareness — they read records by
+  ``(offset, length)`` from the index, and those offsets already point
+  past the RDW.
+
+**Consequences:**
+
+- A new schema example lives at ``config/segments.example-rdw.json``
+  showing both files with different RDW widths and encodings. Copy and
+  edit when onboarding a new source.
+- Adding RDW support to a previously-plain pipeline is a config-only
+  change. No code change is required to opt in.
+- Encoding is currently informational; introducing length validation
+  later is a parser-only change that can read the recorded encoding
+  to decode rdw1 correctly.
+- The skip happens at the iterator boundary, so every consumer
+  (single-process pipeline, parallel pipeline, external sort, dry run)
+  picks it up uniformly with no per-call-site special-casing.
+- 14 new tests pin the behavior: parser-level (skip, truncated, EOF,
+  None-is-identity, multi-record offsets), config loader (presence,
+  absence, validation errors, example file loads), and an end-to-end
+  pipeline test comparing an RDW-prefixed File A with a plain File B.
+  Total suite: **212 tests passing**.

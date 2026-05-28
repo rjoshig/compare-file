@@ -1,5 +1,5 @@
 {
-  "$comment": "Segment catalog and parser knobs. Phase 1 honors only the default values for the parser knobs; they exist now so real-world file variants are config changes, not code changes.",
+  "$comment": "Segment catalog and parser knobs. Phase 1 honors only the default values for the parser knobs; they exist now so real-world file variants are config changes, not code changes. For inputs that carry a per-record RDW prefix, see config/segments.example-rdw.json (parser.file_a.rdw / parser.file_b.rdw blocks) — ADR-031.",
 
   "known_segments": [
     "TU4R",

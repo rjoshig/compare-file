@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Iterator
 
 from segment_compare.config import ResolvedConfig
-from segment_compare.parser import iter_records
+from segment_compare.parser import RdwConfig, iter_records
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ def external_sort_file(
     input_path: Path,
     output_path: Path,
     config: ResolvedConfig,
+    rdw_cfg: RdwConfig | None = None,
 ) -> int:
     """Read records from ``input_path``, write sorted-by-key records to ``output_path``.
 
@@ -57,6 +58,11 @@ def external_sort_file(
             controls the in-memory buffer size; ``runtime.sort_temp_dir``
             is the directory where spill files land (created if absent
             and deleted after the merge completes).
+        rdw_cfg: Optional Record Descriptor Word prefix declared for
+            ``input_path``. When provided, the spill pass consumes
+            ``rdw_cfg.total_bytes`` before each record's key segment
+            and discards them, so the sorted output never carries an
+            RDW prefix.
 
     Returns:
         The number of records sorted (also the number of records
@@ -79,7 +85,7 @@ def external_sort_file(
         # Pass 1: chunk + sort + spill.
         with input_path.open("rb") as fh:
             batch: list[tuple[str, bytes]] = []
-            for rec in iter_records(fh, config.parser, config.segments):
+            for rec in iter_records(fh, config.parser, config.segments, rdw_cfg):
                 batch.append((rec.key, rec.raw))
                 record_count += 1
                 if len(batch) >= chunk_size:

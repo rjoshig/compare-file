@@ -354,6 +354,56 @@ def test_single_record_with_multi_segment_mismatch_emits_multiple_report_rows(
     assert "KEY000000001,TR01,content_diff,1,1" in body_rows
 
 
+def _write_rdw_config_dir(tmp_path: Path, file_a_rdw: dict | None) -> Path:
+    """Clone the committed config into tmp_path, optionally adding an RDW block for file A."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    segments = json.loads((CONFIG_DIR / "segments.json").read_text(encoding="utf-8"))
+    if file_a_rdw is not None:
+        segments["parser"]["file_a"] = {"rdw": file_a_rdw}
+    (cfg_dir / "segments.json").write_text(json.dumps(segments))
+    (cfg_dir / "normalization.json").write_text(
+        (CONFIG_DIR / "normalization.json").read_text(encoding="utf-8")
+    )
+    (cfg_dir / "runtime.json").write_text((CONFIG_DIR / "runtime.json").read_text(encoding="utf-8"))
+    return cfg_dir
+
+
+def test_run_with_rdw_prefixed_file_a_matches_plain_file_b(tmp_path: Path) -> None:
+    """File A wrapped in a 4-byte RDW prefix per record must still match plain File B.
+
+    Proves the parser skips rdw1+rdw2 bytes before each record and that
+    pipeline.run threads config.file_a_rdw / file_b_rdw correctly.
+    """
+    rec = _make_record("KEY000000001")
+    # File A: each record preceded by a 4-byte LE-uint RDW header.
+    rdw_prefix = b"\x2f\x00\x00\x00"  # 47 (record length, informational only)
+    (tmp_path / "a.dat").write_bytes(rdw_prefix + rec + b"\n")
+    # File B: plain — no RDW prefix.
+    (tmp_path / "b.dat").write_bytes(rec + b"\n")
+
+    cfg_dir = _write_rdw_config_dir(
+        tmp_path,
+        file_a_rdw={"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"},
+    )
+    config = load_config(cfg_dir)
+    assert config.file_a_rdw is not None
+    assert config.file_b_rdw is None
+
+    out = tmp_path / "out"
+    summary = run(
+        tmp_path / "a.dat",
+        tmp_path / "b.dat",
+        config,
+        out,
+        run_timestamp=FIXED_TS,
+    )
+    assert summary.file_a_record_count == 1
+    assert summary.file_b_record_count == 1
+    assert summary.records_matched == 1
+    assert summary.records_mismatched == 0
+
+
 def test_default_timestamp_used_when_run_timestamp_omitted(tmp_path: Path) -> None:
     """When run_timestamp is not supplied, pipeline.run uses now() and stamps files."""
     records = [_make_record("KEY000000001")]

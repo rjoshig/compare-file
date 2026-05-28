@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from segment_compare.parser import ParserConfig, SegmentsConfig
+from segment_compare.parser import ParserConfig, RdwConfig, SegmentsConfig
 
 SEGMENTS_FILE = "segments.json"
 NORMALIZATION_FILE = "normalization.json"
@@ -31,6 +31,7 @@ SUPPORTED_KEY_TYPES = ("alphanumeric", "numeric")
 SUPPORTED_KEY_SORT_ORDERS = ("ascending", "descending")
 SUPPORTED_SIZE_ENCODINGS_PHASE1 = ("ascii_int",)
 SUPPORTED_DATA_ENCODINGS_PHASE1 = ("ascii",)
+SUPPORTED_RDW_ENCODINGS = ("ascii_int", "binary_le_uint")
 
 DEFAULT_SEGMENT_NAME_BYTES = 4
 DEFAULT_SIZE_FIELD_BYTES = 3
@@ -160,6 +161,8 @@ class ResolvedConfig:
     parser: ParserConfig
     segments: SegmentsConfig
     known_segments: tuple[str, ...]
+    file_a_rdw: RdwConfig | None = None
+    file_b_rdw: RdwConfig | None = None
     normalization: dict[str, NormalizationRule] = field(default_factory=dict)
     field_normalization: dict[str, FieldNormalizationRule] = field(default_factory=dict)
     runtime: RuntimeConfig = field(
@@ -201,6 +204,7 @@ def load_config(config_dir: Path) -> ResolvedConfig:
     rt_raw = _read_json(rt_path)
 
     parser_cfg = _build_parser_config(seg_raw, seg_path)
+    file_a_rdw, file_b_rdw = _build_rdw_configs(seg_raw, seg_path)
     known_segments, segments_cfg = _build_segments_config(seg_raw, seg_path)
     normalization, field_normalization = _build_normalization(norm_raw, known_segments, norm_path)
     runtime_cfg = _build_runtime_config(rt_raw, rt_path)
@@ -211,6 +215,8 @@ def load_config(config_dir: Path) -> ResolvedConfig:
         parser=parser_cfg,
         segments=segments_cfg,
         known_segments=known_segments,
+        file_a_rdw=file_a_rdw,
+        file_b_rdw=file_b_rdw,
         normalization=normalization,
         field_normalization=field_normalization,
         runtime=runtime_cfg,
@@ -302,6 +308,59 @@ def _build_parser_config(seg_raw: dict[str, Any], seg_path: Path) -> ParserConfi
         size_includes_header=inc,
         data_encoding=data_enc,
     )
+
+
+def _build_rdw_configs(
+    seg_raw: dict[str, Any], seg_path: Path
+) -> tuple[RdwConfig | None, RdwConfig | None]:
+    """Parse optional per-file RDW prefix blocks from ``parser.file_a`` / ``parser.file_b``.
+
+    Either or both blocks may be absent. When present, the ``rdw``
+    sub-object must declare positive ``rdw1_bytes`` and ``rdw2_bytes``
+    and an encoding from :data:`SUPPORTED_RDW_ENCODINGS`.
+    """
+    parser_in = seg_raw.get("parser", {})
+    return (
+        _build_rdw_for_file(parser_in, "file_a", seg_path),
+        _build_rdw_for_file(parser_in, "file_b", seg_path),
+    )
+
+
+def _build_rdw_for_file(
+    parser_in: dict[str, Any], file_key: str, seg_path: Path
+) -> RdwConfig | None:
+    file_block = parser_in.get(file_key)
+    if file_block is None:
+        return None
+    _require_type(file_block, dict, seg_path, f"parser.{file_key}")
+    rdw_raw = file_block.get("rdw")
+    if rdw_raw is None:
+        return None
+    _require_type(rdw_raw, dict, seg_path, f"parser.{file_key}.rdw")
+
+    field_path = f"parser.{file_key}.rdw"
+    rdw1 = _require_field(rdw_raw, "rdw1_bytes", seg_path)
+    rdw2 = _require_field(rdw_raw, "rdw2_bytes", seg_path)
+    encoding = _require_field(rdw_raw, "encoding", seg_path)
+    _require_type(rdw1, int, seg_path, f"{field_path}.rdw1_bytes")
+    _require_type(rdw2, int, seg_path, f"{field_path}.rdw2_bytes")
+    _require_type(encoding, str, seg_path, f"{field_path}.encoding")
+    if rdw1 <= 0:
+        raise ConfigError(
+            f"{seg_path.name}::{field_path}.rdw1_bytes",
+            f"must be > 0, got {rdw1}",
+        )
+    if rdw2 <= 0:
+        raise ConfigError(
+            f"{seg_path.name}::{field_path}.rdw2_bytes",
+            f"must be > 0, got {rdw2}",
+        )
+    if encoding not in SUPPORTED_RDW_ENCODINGS:
+        raise ConfigError(
+            f"{seg_path.name}::{field_path}.encoding",
+            f"must be one of {list(SUPPORTED_RDW_ENCODINGS)}, got {encoding!r}",
+        )
+    return RdwConfig(rdw1_bytes=rdw1, rdw2_bytes=rdw2, encoding=encoding)
 
 
 def _build_segments_config(

@@ -9,6 +9,113 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-28 (per-file RDW prefix support)
+
+**Branch:** `dev`
+**Phase:** 2 (engine extension — no phase change)
+**Status:** RDW skip landed end-to-end. 212 tests pass on pyenv 3.12.7;
+`black`, `flake8`, `mypy --strict` all clean.
+
+### What was completed
+
+User reported that real-world inputs may carry a Record Descriptor Word
+prefix (two integer fields, ``rdw1`` + ``rdw2``) before each record's
+TU4R segment. Either File A or File B can carry it independently, and
+the encoding (ASCII zero-padded vs. binary little-endian uint) and
+widths vary by source. The engine only needs to skip the bytes.
+
+Changes:
+
+- `src/segment_compare/parser.py` — added :class:`RdwConfig` dataclass
+  (``rdw1_bytes``, ``rdw2_bytes``, ``encoding``, ``total_bytes``
+  property). :func:`iter_records` accepts an optional
+  ``rdw_cfg: RdwConfig | None``; when set, it consumes
+  ``rdw_cfg.total_bytes`` at the start of each iteration before reading
+  the key segment. ``Record.offset`` / ``Record.length`` stay relative
+  to the key segment so the single-record seek-and-read path in
+  pipeline + worker stays uniform.
+- `src/segment_compare/config.py` — new ``SUPPORTED_RDW_ENCODINGS =
+  ("ascii_int", "binary_le_uint")``. Added ``file_a_rdw`` /
+  ``file_b_rdw`` fields on :class:`ResolvedConfig`. New
+  ``_build_rdw_configs`` / ``_build_rdw_for_file`` validate the
+  optional ``parser.file_a.rdw`` and ``parser.file_b.rdw`` blocks.
+- `src/segment_compare/pipeline.py` — `run` / `run_parallel` / `dry_run`
+  thread the per-file RDW into `_index_file` and
+  `_external_sort_inputs`. When external sort runs, the sorted temp
+  copies have no RDW, so the post-sort indexing pass uses
+  ``rdw_cfg=None``.
+- `src/segment_compare/external_sort.py` — `external_sort_file` accepts
+  ``rdw_cfg`` and passes it to the input scan; the merged output is
+  plain (no RDW).
+- `config/segments.example-rdw.json` — full example showing per-file
+  RDW blocks with different widths and encodings.
+- `config/segments.json` — `$comment` updated to point at the example
+  for users with RDW-prefixed inputs.
+- `README.md` — Repository layout section expanded into a full
+  directory/file tree, plus new "Bootstrap a fresh checkout" section
+  with idempotent bash and PowerShell scaffolding scripts.
+- `docs/decisions.md` — added **ADR-031** documenting the schema,
+  parser contract, pipeline wiring, and out-of-scope length validation.
+
+Tests added (14 total, suite goes 198 → 212):
+
+- `tests/test_parser.py` — RDW round-trip (single + multi-record),
+  truncated-RDW raises, clean EOF before RDW returns, ``None`` cfg is
+  identity, `RdwConfig.total_bytes`.
+- `tests/test_config.py` — absent yields ``None``; both-files present;
+  only-file-a present; bad encoding rejected; zero-size rejected;
+  missing-field rejected; example file in repo loads cleanly.
+- `tests/test_pipeline.py` — end-to-end: File A wrapped in a 4-byte
+  RDW prefix and File B plain produce a single match (records
+  compare equal once the prefix is skipped).
+
+### What's pending
+
+Phase 3 kickoff (FastAPI scaffolding) — unchanged from the prior
+handoff entry below. RDW support extends Phase 2's engine surface but
+does not move the phase pointer.
+
+Out-of-scope for this session (recorded for future ADRs if asked):
+
+- Validating ``rdw1`` against actual record length (encoding field is
+  ready for it; parser would need to decode based on ``encoding``).
+- CLI override of the RDW block on a per-invocation basis.
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-031**: per-file RDW prefix is configurable via
+  ``segments.json::parser.file_a.rdw`` / ``parser.file_b.rdw``,
+  consumed but not interpreted. Encoding (``ascii_int`` /
+  ``binary_le_uint``) is recorded for future validation work.
+
+### Next concrete action
+
+Resume the Phase 3 handoff plan in the entry below — open
+`docs/phase-3.md` and start FastAPI scaffolding. The RDW extension
+slots in transparently for Phase 3/4 callers since
+``pipeline.run`` / `run_parallel` read the per-file RDW from the
+already-loaded config.
+
+### Notes for future me
+
+- `record.offset` and `record.length` deliberately exclude the RDW
+  bytes — they point at TU4R and span TU4R..ENDS+delim. Anywhere we
+  re-read a record by `(offset, length)` (workers, `_read_record_at`),
+  no RDW handling is needed.
+- The single place that **does** need RDW awareness is the streaming
+  scan: `iter_records` when called against the raw input file. Sorted
+  temp files written by the engine never carry an RDW, so post-sort
+  index passes use `rdw_cfg=None`.
+- If a future input carries RDW only at the file start (not per
+  record), this design does not cover it — we'd add a separate
+  `header_skip_bytes` knob rather than overloading `rdw`.
+
+---
+
 ## Session: 2026-05-28 (pause-and-handoff to Phase 3)
 
 **Branch:** `dev` (tag `phase-2-complete` at `ffc96de`)

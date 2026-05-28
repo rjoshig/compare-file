@@ -380,6 +380,86 @@ def test_missing_runtime_field_raises(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-file RDW prefix (segments.json::parser.file_a.rdw / file_b.rdw)
+# ---------------------------------------------------------------------------
+
+
+def _segments_with_rdw(
+    file_a: dict | None = None,
+    file_b: dict | None = None,
+) -> dict:
+    seg = _default_segments()
+    if file_a is not None:
+        seg["parser"]["file_a"] = {"rdw": file_a}
+    if file_b is not None:
+        seg["parser"]["file_b"] = {"rdw": file_b}
+    return seg
+
+
+def test_load_config_rdw_absent_yields_none(tmp_path: Path) -> None:
+    cfg_dir = _write_configs(tmp_path)
+    resolved = load_config(cfg_dir)
+    assert resolved.file_a_rdw is None
+    assert resolved.file_b_rdw is None
+
+
+def test_load_config_rdw_both_files_present(tmp_path: Path) -> None:
+    rdw = {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "binary_le_uint"}
+    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(rdw, rdw))
+    resolved = load_config(cfg_dir)
+    assert resolved.file_a_rdw is not None
+    assert resolved.file_a_rdw.rdw1_bytes == 2
+    assert resolved.file_a_rdw.rdw2_bytes == 2
+    assert resolved.file_a_rdw.encoding == "binary_le_uint"
+    assert resolved.file_a_rdw.total_bytes == 4
+    assert resolved.file_b_rdw == resolved.file_a_rdw
+
+
+def test_load_config_rdw_only_file_a(tmp_path: Path) -> None:
+    rdw = {"rdw1_bytes": 2, "rdw2_bytes": 3, "encoding": "ascii_int"}
+    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(file_a=rdw))
+    resolved = load_config(cfg_dir)
+    assert resolved.file_a_rdw is not None
+    assert resolved.file_a_rdw.total_bytes == 5
+    assert resolved.file_b_rdw is None
+
+
+def test_load_config_rdw_invalid_encoding_raises(tmp_path: Path) -> None:
+    rdw = {"rdw1_bytes": 2, "rdw2_bytes": 2, "encoding": "ebcdic"}
+    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(file_a=rdw))
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(cfg_dir)
+    assert "encoding" in excinfo.value.field
+
+
+def test_load_config_rdw_zero_size_raises(tmp_path: Path) -> None:
+    rdw = {"rdw1_bytes": 0, "rdw2_bytes": 2, "encoding": "ascii_int"}
+    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(file_a=rdw))
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(cfg_dir)
+    assert "rdw1_bytes" in excinfo.value.field
+
+
+def test_load_config_rdw_missing_field_raises(tmp_path: Path) -> None:
+    rdw = {"rdw1_bytes": 2, "rdw2_bytes": 2}  # missing encoding
+    cfg_dir = _write_configs(tmp_path, segments=_segments_with_rdw(file_a=rdw))
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(cfg_dir)
+    assert "encoding" in excinfo.value.field
+
+
+def test_load_example_rdw_config_in_repo(tmp_path: Path) -> None:
+    """The committed config/segments.example-rdw.json must load cleanly."""
+    example = json.loads((CONFIG_DIR / "segments.example-rdw.json").read_text(encoding="utf-8"))
+    cfg_dir = _write_configs(tmp_path, segments=example)
+    resolved = load_config(cfg_dir)
+    assert resolved.file_a_rdw is not None
+    assert resolved.file_b_rdw is not None
+    assert resolved.file_a_rdw.encoding == "binary_le_uint"
+    assert resolved.file_b_rdw.encoding == "ascii_int"
+
+
+# ---------------------------------------------------------------------------
 # Frozen-ness
 # ---------------------------------------------------------------------------
 

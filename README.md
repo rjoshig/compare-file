@@ -311,19 +311,184 @@ For the full step-by-step explanation of what happens between
 
 ## Repository layout
 
+High-level view of every directory and every file that ships with the
+repo (generated artifacts like `.venv/`, `results*/`, `__pycache__/`,
+`tests/fixtures/synth_*` benchmark data, and `*.egg-info/` are excluded):
+
 ```
 compare-file/
-├── CLAUDE.md            # how to work on this repo
-├── README.md            # you are here
-├── pyproject.toml
+├── CLAUDE.md                              # how to work on this repo
+├── README.md                              # you are here
+├── pyproject.toml                         # build + tool config (black, mypy, flake8 sections)
+├── .flake8                                # flake8 settings
 ├── .gitignore
-├── config/              # JSON config: segments, normalization, runtime
-├── docs/                # architecture, phase plans, decisions, session log
-├── src/segment_compare/ # engine + CLI + API (Phase 3) + service (Phase 4)
-├── tests/               # pytest suites
-├── examples/            # small hand-crafted sample input files
-└── ui/                  # Phase 3 Vue.js frontend (placeholder for now)
+├── .python-version                        # pyenv pin (3.12.7)
+├── config/
+│   ├── segments.json                      # segment catalog + parser knobs
+│   ├── normalization.json                 # per-segment strip/exclude rules
+│   ├── runtime.json                       # hash method, workers, sort settings
+│   └── segments.example-rdw.json          # example: per-file RDW prefix schema
+├── docs/
+│   ├── architecture.md
+│   ├── decisions.md                       # ADRs (append-only)
+│   ├── how-it-works.md                    # engine walkthrough + reliability math
+│   ├── phase-plan.md
+│   ├── phase-1.md
+│   ├── phase-2.md
+│   ├── phase-3.md
+│   ├── phase-4.md
+│   ├── session-log.md                     # working journal (read first / write last)
+│   └── benchmarks/
+│       └── phase-2.md                     # measured 3M-record numbers
+├── src/
+│   └── segment_compare/
+│       ├── __init__.py
+│       ├── __main__.py                    # CLI entry point
+│       ├── parser.py                      # streaming segment + record parser
+│       ├── config.py                      # JSON config loader + validator
+│       ├── normalizer.py                  # position + composite dispatch
+│       ├── hasher.py                      # blake2b + builtin behind a Protocol
+│       ├── comparator.py                  # per-record multiset hash compare
+│       ├── writer.py                      # eight output files + Summary
+│       ├── pipeline.py                    # run() / run_parallel() / dry_run()
+│       ├── partitioner.py                 # equal-count key partitioning
+│       ├── worker.py                      # subprocess entry point
+│       ├── merger.py                      # fold per-worker outputs
+│       ├── external_sort.py               # chunk-and-merge sort
+│       ├── py.typed                       # PEP-561 marker
+│       └── api/
+│           └── __init__.py                # Phase 3 FastAPI (placeholder)
+├── tests/
+│   ├── __init__.py
+│   ├── synthetic_data.py                  # generate_pair(num_records, seed, ...)
+│   ├── test_parser.py
+│   ├── test_config.py
+│   ├── test_normalizer.py
+│   ├── test_hasher.py
+│   ├── test_comparator.py
+│   ├── test_writer.py
+│   ├── test_pipeline.py
+│   ├── test_partitioner.py
+│   ├── test_merger.py
+│   ├── test_external_sort.py
+│   ├── test_field_normalizer.py
+│   ├── test_field_config.py
+│   ├── test_field_integration.py
+│   ├── test_parallel.py
+│   ├── test_main.py
+│   └── test_synthetic_data.py
+├── examples/
+│   ├── README.md                          # sample-file format reference
+│   ├── sample_a.dat
+│   └── sample_b.dat
+└── ui/
+    └── README.md                          # Phase 3 placeholder
 ```
+
+### Bootstrap a fresh checkout
+
+If you're recreating this skeleton from scratch (or auditing that a
+clone has every expected file), one of the two snippets below scaffolds
+the entire tree with empty files. **Run it inside an empty directory
+named `compare-file/`.** It only creates files that are missing — it
+does not overwrite anything.
+
+**Linux / macOS (bash or zsh):**
+
+```bash
+mkdir -p config docs/benchmarks src/segment_compare/api tests examples ui
+
+# Top-level files
+touch CLAUDE.md README.md pyproject.toml .flake8 .gitignore .python-version
+
+# config/
+touch config/segments.json config/normalization.json config/runtime.json \
+      config/segments.example-rdw.json
+
+# docs/
+touch docs/architecture.md docs/decisions.md docs/how-it-works.md \
+      docs/phase-plan.md docs/phase-1.md docs/phase-2.md docs/phase-3.md \
+      docs/phase-4.md docs/session-log.md docs/benchmarks/phase-2.md
+
+# src/segment_compare/
+touch src/segment_compare/__init__.py src/segment_compare/__main__.py \
+      src/segment_compare/parser.py src/segment_compare/config.py \
+      src/segment_compare/normalizer.py src/segment_compare/hasher.py \
+      src/segment_compare/comparator.py src/segment_compare/writer.py \
+      src/segment_compare/pipeline.py src/segment_compare/partitioner.py \
+      src/segment_compare/worker.py src/segment_compare/merger.py \
+      src/segment_compare/external_sort.py src/segment_compare/py.typed \
+      src/segment_compare/api/__init__.py
+
+# tests/
+touch tests/__init__.py tests/synthetic_data.py \
+      tests/test_parser.py tests/test_config.py tests/test_normalizer.py \
+      tests/test_hasher.py tests/test_comparator.py tests/test_writer.py \
+      tests/test_pipeline.py tests/test_partitioner.py tests/test_merger.py \
+      tests/test_external_sort.py tests/test_field_normalizer.py \
+      tests/test_field_config.py tests/test_field_integration.py \
+      tests/test_parallel.py tests/test_main.py tests/test_synthetic_data.py
+
+# examples/ + ui/
+touch examples/README.md examples/sample_a.dat examples/sample_b.dat
+touch ui/README.md
+```
+
+**Windows (PowerShell):**
+
+```powershell
+$dirs = @(
+    'config', 'docs/benchmarks', 'src/segment_compare/api',
+    'tests', 'examples', 'ui'
+)
+$dirs | ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
+
+$files = @(
+    # top-level
+    'CLAUDE.md','README.md','pyproject.toml','.flake8','.gitignore','.python-version',
+
+    # config/
+    'config/segments.json','config/normalization.json','config/runtime.json',
+    'config/segments.example-rdw.json',
+
+    # docs/
+    'docs/architecture.md','docs/decisions.md','docs/how-it-works.md',
+    'docs/phase-plan.md','docs/phase-1.md','docs/phase-2.md','docs/phase-3.md',
+    'docs/phase-4.md','docs/session-log.md','docs/benchmarks/phase-2.md',
+
+    # src/segment_compare/
+    'src/segment_compare/__init__.py','src/segment_compare/__main__.py',
+    'src/segment_compare/parser.py','src/segment_compare/config.py',
+    'src/segment_compare/normalizer.py','src/segment_compare/hasher.py',
+    'src/segment_compare/comparator.py','src/segment_compare/writer.py',
+    'src/segment_compare/pipeline.py','src/segment_compare/partitioner.py',
+    'src/segment_compare/worker.py','src/segment_compare/merger.py',
+    'src/segment_compare/external_sort.py','src/segment_compare/py.typed',
+    'src/segment_compare/api/__init__.py',
+
+    # tests/
+    'tests/__init__.py','tests/synthetic_data.py',
+    'tests/test_parser.py','tests/test_config.py','tests/test_normalizer.py',
+    'tests/test_hasher.py','tests/test_comparator.py','tests/test_writer.py',
+    'tests/test_pipeline.py','tests/test_partitioner.py','tests/test_merger.py',
+    'tests/test_external_sort.py','tests/test_field_normalizer.py',
+    'tests/test_field_config.py','tests/test_field_integration.py',
+    'tests/test_parallel.py','tests/test_main.py','tests/test_synthetic_data.py',
+
+    # examples/ + ui/
+    'examples/README.md','examples/sample_a.dat','examples/sample_b.dat',
+    'ui/README.md'
+)
+$files | ForEach-Object {
+    if (-not (Test-Path -LiteralPath $_)) {
+        New-Item -ItemType File -Path $_ -Force | Out-Null
+    }
+}
+```
+
+After scaffolding, the real content for each file comes from this
+repo's git history — clone or copy in the actual source rather than
+filling in the empties by hand.
 
 ## Documentation
 

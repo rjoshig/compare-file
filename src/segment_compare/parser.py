@@ -91,6 +91,41 @@ class SegmentsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RdwConfig:
+    """Optional Record Descriptor Word prefix that sits before each record.
+
+    Some upstream systems (mainframe extracts especially) prepend a small
+    fixed prefix to every record before the key segment. The engine
+    doesn't need to interpret it for comparison — :func:`iter_records`
+    just consumes ``total_bytes`` bytes and discards them before reading
+    the key segment header.
+
+    The two-field shape (``rdw1`` + ``rdw2``) mirrors the classic
+    mainframe RDW layout (length + reserved) but each field's width and
+    encoding is configurable. ``encoding`` is recorded for future
+    validation/diagnostics; the skip logic itself is encoding-agnostic.
+
+    Attributes:
+        rdw1_bytes: Width in bytes of the first RDW field. Must be > 0.
+        rdw2_bytes: Width in bytes of the second RDW field. Must be > 0.
+        encoding: How the fields are encoded on disk. Either
+            ``"ascii_int"`` (zero-padded ASCII decimal) or
+            ``"binary_le_uint"`` (unsigned little-endian integer).
+            Currently used only for diagnostics; the skip path consumes
+            ``total_bytes`` raw bytes regardless of encoding.
+    """
+
+    rdw1_bytes: int
+    rdw2_bytes: int
+    encoding: str
+
+    @property
+    def total_bytes(self) -> int:
+        """Total bytes consumed by the RDW prefix (``rdw1 + rdw2``)."""
+        return self.rdw1_bytes + self.rdw2_bytes
+
+
+@dataclass(frozen=True, slots=True)
 class Segment:
     """A single parsed segment.
 
@@ -248,11 +283,14 @@ def iter_records(
     stream: BinaryIO,
     parser_cfg: ParserConfig,
     segments_cfg: SegmentsConfig,
+    rdw_cfg: RdwConfig | None = None,
 ) -> Iterator[Record]:
     """Yield :class:`Record` instances framed by key + terminator segments.
 
     Each record must:
 
+    - optionally begin with a Record Descriptor Word prefix of
+      ``rdw_cfg.total_bytes`` bytes (consumed and discarded; not parsed),
     - begin with a segment whose name equals ``segments_cfg.key_segment``,
     - end with a segment whose name equals ``segments_cfg.end_segment``,
     - be followed by ``segments_cfg.record_delimiter`` (or EOF, for the
@@ -263,6 +301,13 @@ def iter_records(
             first record.
         parser_cfg: Parser knobs.
         segments_cfg: Record-framing config.
+        rdw_cfg: Optional :class:`RdwConfig`. When provided, the parser
+            skips ``rdw_cfg.total_bytes`` bytes before each record's key
+            segment. ``Record.offset`` and ``Record.length`` are reported
+            *relative to the key segment*, so seeking back via
+            ``(offset, length)`` reads the record without re-skipping
+            the RDW — this keeps the seek-and-read path uniform across
+            RDW-prefixed and plain inputs.
 
     Yields:
         Successive records as they are read from the stream.
@@ -270,14 +315,27 @@ def iter_records(
     Raises:
         ParseError: If a record does not start with the key segment,
             ends in EOF before the terminator, has an unexpected
-            delimiter byte sequence, or contains a corrupt segment.
+            delimiter byte sequence, contains a corrupt segment, or has
+            a truncated RDW prefix.
     """
     offset = 0
     delimiter = segments_cfg.record_delimiter
     key_start, key_end = segments_cfg.key_range
     delim_len = len(delimiter)
+    rdw_total = rdw_cfg.total_bytes if rdw_cfg is not None else 0
 
     while True:
+        if rdw_total > 0:
+            rdw_bytes = stream.read(rdw_total)
+            if not rdw_bytes:
+                return
+            if len(rdw_bytes) < rdw_total:
+                raise ParseError(
+                    offset,
+                    f"truncated RDW prefix: expected {rdw_total} bytes, " f"got {len(rdw_bytes)}",
+                )
+            offset += rdw_total
+
         record_start = offset
         first_seg = _read_segment(stream, parser_cfg, offset)
         if first_seg is None:

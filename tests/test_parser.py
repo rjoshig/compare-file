@@ -10,6 +10,7 @@ import pytest
 from segment_compare.parser import (
     ParseError,
     ParserConfig,
+    RdwConfig,
     Record,
     Segment,
     SegmentsConfig,
@@ -303,6 +304,71 @@ def test_ends_with_non_zero_data_payload_is_parsed_correctly() -> None:
     assert ends_seg.name == "ENDS"
     assert ends_seg.size == 10
     assert ends_seg.data == b"ABC"
+
+
+# ---------------------------------------------------------------------------
+# RDW prefix skip
+# ---------------------------------------------------------------------------
+
+
+def test_iter_records_with_rdw_skips_prefix_and_reports_offsets_after_rdw() -> None:
+    """A 4-byte RDW prefix is consumed; record offsets/lengths cover only TU4R..ENDS+delim."""
+    rdw = RdwConfig(rdw1_bytes=2, rdw2_bytes=2, encoding="binary_le_uint")
+    body = b"TU4R019KEY000000001NM01017NAME_ALICEENDS007"
+    raw = b"\x2f\x00\x00\x00" + body + b"\n"
+    records = list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, rdw))
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.key == "KEY000000001"
+    assert rec.raw == body
+    assert rec.offset == 4  # post-RDW position
+    assert rec.length == len(body) + 1  # body + delimiter
+
+
+def test_iter_records_with_rdw_multi_record_offsets_advance_by_rdw_plus_record() -> None:
+    rdw = RdwConfig(rdw1_bytes=2, rdw2_bytes=2, encoding="binary_le_uint")
+    body_a = b"TU4R019KEY000000001NM01017NAME_ALICEENDS007"
+    body_b = b"TU4R019KEY000000002NM01017NAME_BOB__ENDS007"
+    raw = b"\x2c\x00\x00\x00" + body_a + b"\n" + b"\x2c\x00\x00\x00" + body_b + b"\n"
+    records = list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, rdw))
+    assert len(records) == 2
+    assert records[0].key == "KEY000000001"
+    assert records[1].key == "KEY000000002"
+    # First record starts at byte 4 (after first RDW).
+    assert records[0].offset == 4
+    # Second record starts after: 4 (rdw_a) + 44 (rec_a body+delim) + 4 (rdw_b) = 52.
+    assert records[1].offset == 52
+
+
+def test_iter_records_truncated_rdw_raises() -> None:
+    rdw = RdwConfig(rdw1_bytes=2, rdw2_bytes=2, encoding="binary_le_uint")
+    raw = b"\x01\x00"  # 2 bytes only; need 4
+    with pytest.raises(ParseError) as excinfo:
+        list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, rdw))
+    assert "RDW" in excinfo.value.message
+
+
+def test_iter_records_no_rdw_bytes_at_eof_is_clean() -> None:
+    """Zero bytes available at the start of a new record (after the previous one) is OK."""
+    rdw = RdwConfig(rdw1_bytes=2, rdw2_bytes=2, encoding="binary_le_uint")
+    body = b"TU4R019KEY000000001NM01017NAME_ALICEENDS007"
+    raw = b"\x2c\x00\x00\x00" + body + b"\n"  # exactly one record, then EOF
+    records = list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, rdw))
+    assert len(records) == 1
+
+
+def test_iter_records_rdw_none_is_identity_with_default() -> None:
+    """Passing rdw_cfg=None must behave exactly like omitting it."""
+    body = b"TU4R019KEY000000001NM01017NAME_ALICEENDS007"
+    raw = body + b"\n"
+    a = list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS))
+    b = list(iter_records(_stream(raw), DEFAULT_PARSER, DEFAULT_SEGMENTS, None))
+    assert a == b
+
+
+def test_rdw_config_total_bytes() -> None:
+    assert RdwConfig(rdw1_bytes=2, rdw2_bytes=3, encoding="ascii_int").total_bytes == 5
+    assert RdwConfig(rdw1_bytes=1, rdw2_bytes=1, encoding="binary_le_uint").total_bytes == 2
 
 
 # ---------------------------------------------------------------------------

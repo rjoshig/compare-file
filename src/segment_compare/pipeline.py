@@ -39,7 +39,7 @@ from segment_compare.external_sort import external_sort_file
 from segment_compare.hasher import build_hasher
 from segment_compare.merger import fold_partial_summaries, merge_worker_outputs
 from segment_compare.normalizer import CompositeNormalizer
-from segment_compare.parser import Record, iter_records
+from segment_compare.parser import Record, RdwConfig, iter_records
 from segment_compare.partitioner import equal_count_partition
 from segment_compare.worker import WorkerPayload, WorkerResult, run_worker
 from segment_compare.writer import (
@@ -84,8 +84,8 @@ def dry_run(file_a: Path, file_b: Path, config: ResolvedConfig) -> DryRunReport:
     for path in (file_a, file_b):
         if not path.exists():
             raise InputFileError(f"input file does not exist: {path}")
-    _, dups_a, total_a, _ = _index_file(file_a, config)
-    _, dups_b, total_b, _ = _index_file(file_b, config)
+    _, dups_a, total_a, _ = _index_file(file_a, config, config.file_a_rdw)
+    _, dups_b, total_b, _ = _index_file(file_b, config, config.file_b_rdw)
     return DryRunReport(
         file_a_records=total_a,
         file_b_records=total_b,
@@ -136,11 +136,17 @@ def run(
     logger.info("starting comparison: %s vs %s (stamp=%s)", file_a, file_b, filename_stamp)
 
     original_file_a, original_file_b = file_a, file_b
+    rdw_a: RdwConfig | None = config.file_a_rdw
+    rdw_b: RdwConfig | None = config.file_b_rdw
     if external_sort or not config.runtime.input_sorted:
         file_a, file_b = _external_sort_inputs(file_a, file_b, config, filename_stamp)
+        # The sorted temp copies are written by the engine without an RDW
+        # prefix, so downstream passes must not try to skip it.
+        rdw_a = None
+        rdw_b = None
 
-    index_a, dups_a, total_a, segments_a = _index_file(file_a, config)
-    index_b, dups_b, total_b, segments_b = _index_file(file_b, config)
+    index_a, dups_a, total_a, segments_a = _index_file(file_a, config, rdw_a)
+    index_b, dups_b, total_b, segments_b = _index_file(file_b, config, rdw_b)
     logger.info(
         "indexed: A=%d records (%d dup keys), B=%d records (%d dup keys)",
         total_a,
@@ -297,11 +303,15 @@ def run_parallel(
     )
 
     original_file_a, original_file_b = file_a, file_b
+    rdw_a: RdwConfig | None = config.file_a_rdw
+    rdw_b: RdwConfig | None = config.file_b_rdw
     if external_sort or not config.runtime.input_sorted:
         file_a, file_b = _external_sort_inputs(file_a, file_b, config, filename_stamp)
+        rdw_a = None
+        rdw_b = None
 
-    index_a, dups_a, total_a, segments_a = _index_file(file_a, config)
-    index_b, dups_b, total_b, segments_b = _index_file(file_b, config)
+    index_a, dups_a, total_a, segments_a = _index_file(file_a, config, rdw_a)
+    index_b, dups_b, total_b, segments_b = _index_file(file_b, config, rdw_b)
     logger.info(
         "indexed: A=%d records (%d dup keys), B=%d records (%d dup keys)",
         total_a,
@@ -428,13 +438,20 @@ def run_parallel(
 # ---------------------------------------------------------------------------
 
 
-def _index_file(path: Path, config: ResolvedConfig) -> tuple[
+def _index_file(path: Path, config: ResolvedConfig, rdw_cfg: RdwConfig | None = None) -> tuple[
     dict[str, tuple[int, int]],
     dict[str, list[tuple[int, int]]],
     int,
     Counter[str],
 ]:
     """Single streaming pass building the key index, dup map, and counts.
+
+    Args:
+        path: File to scan.
+        config: Resolved engine config.
+        rdw_cfg: Optional per-file RDW prefix to skip before each record.
+            Pass ``None`` when reading an engine-written file (sorted
+            temp output) since those never carry an RDW prefix.
 
     Returns:
         ``(good_index, dup_offsets, total_records, segment_counts)``.
@@ -453,7 +470,7 @@ def _index_file(path: Path, config: ResolvedConfig) -> tuple[
     total_records = 0
 
     with path.open("rb") as fh:
-        for record in iter_records(fh, config.parser, config.segments):
+        for record in iter_records(fh, config.parser, config.segments, rdw_cfg):
             total_records += 1
             for seg in record.segments:
                 segment_counts[seg.name] += 1
@@ -528,9 +545,9 @@ def _external_sort_inputs(
     sorted_a = sort_dir / f"sorted_a_{filename_stamp}.dat"
     sorted_b = sort_dir / f"sorted_b_{filename_stamp}.dat"
     logger.info("external-sort: %s -> %s", file_a, sorted_a)
-    external_sort_file(file_a, sorted_a, config)
+    external_sort_file(file_a, sorted_a, config, rdw_cfg=config.file_a_rdw)
     logger.info("external-sort: %s -> %s", file_b, sorted_b)
-    external_sort_file(file_b, sorted_b, config)
+    external_sort_file(file_b, sorted_b, config, rdw_cfg=config.file_b_rdw)
     return sorted_a, sorted_b
 
 
