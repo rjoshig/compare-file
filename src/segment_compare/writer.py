@@ -601,84 +601,371 @@ def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
 <head>
 <meta charset="utf-8">
 <title>Compare report — {e(stamp)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link
+  href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap"
+  rel="stylesheet">
 <style>
+  /* Material 3-inspired tokens. Dark mode follows the OS preference
+     by default and can be forced via ?theme=light or ?theme=dark
+     (handled by the inline script below). */
+  :root {{
+    --bg: #f7f8fb;
+    --surface-1: #ffffff;
+    --surface-2: #f3f4f8;
+    --surface-3: #e9ebf2;
+    --border: #e3e5ea;
+    --divider: #ebedf0;
+    --text-strong: #1c1f24;
+    --text-body: #2d3138;
+    --text-muted: #5b626d;
+    --primary: #2563eb;
+    --primary-soft: rgba(37, 99, 235, 0.10);
+    --tone-a: #2563eb;
+    --tone-a-soft: rgba(37, 99, 235, 0.10);
+    --tone-b: #f59e0b;
+    --tone-b-soft: rgba(245, 158, 11, 0.13);
+    --match: #16a34a;
+    --match-soft: rgba(22, 163, 74, 0.12);
+    --mismatch: #dc2626;
+    --mismatch-soft: rgba(220, 38, 38, 0.12);
+    --warn: #d97706;
+    --elev-1: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
+    --elev-2: 0 2px 4px rgba(0,0,0,0.08), 0 4px 8px rgba(0,0,0,0.05);
+    --radius: 12px;
+    --radius-sm: 8px;
+  }}
+  html.dark, html[data-theme="dark"] {{
+    --bg: #0f1117;
+    --surface-1: #181b22;
+    --surface-2: #1e222b;
+    --surface-3: #232733;
+    --border: #2b303d;
+    --divider: #262a35;
+    --text-strong: #e8ebf2;
+    --text-body: #d2d6e0;
+    --text-muted: #9098a8;
+    --primary: #60a5fa;
+    --primary-soft: rgba(96, 165, 250, 0.16);
+    --tone-a: #60a5fa;
+    --tone-a-soft: rgba(96, 165, 250, 0.16);
+    --tone-b: #fbbf24;
+    --tone-b-soft: rgba(251, 191, 36, 0.16);
+    --match: #22c55e;
+    --match-soft: rgba(34, 197, 94, 0.18);
+    --mismatch: #ef4444;
+    --mismatch-soft: rgba(239, 68, 68, 0.18);
+    --warn: #f59e0b;
+    --elev-1: 0 1px 2px rgba(0,0,0,0.35), 0 1px 3px rgba(0,0,0,0.20);
+    --elev-2: 0 2px 4px rgba(0,0,0,0.40), 0 4px 8px rgba(0,0,0,0.25);
+    color-scheme: dark;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    html:not([data-theme="light"]) {{
+      --bg: #0f1117;
+      --surface-1: #181b22;
+      --surface-2: #1e222b;
+      --surface-3: #232733;
+      --border: #2b303d;
+      --divider: #262a35;
+      --text-strong: #e8ebf2;
+      --text-body: #d2d6e0;
+      --text-muted: #9098a8;
+      --primary: #60a5fa;
+      --primary-soft: rgba(96, 165, 250, 0.16);
+      --tone-a: #60a5fa;
+      --tone-a-soft: rgba(96, 165, 250, 0.16);
+      --tone-b: #fbbf24;
+      --tone-b-soft: rgba(251, 191, 36, 0.16);
+      --match: #22c55e;
+      --match-soft: rgba(34, 197, 94, 0.18);
+      --mismatch: #ef4444;
+      --mismatch-soft: rgba(239, 68, 68, 0.18);
+      --warn: #f59e0b;
+      color-scheme: dark;
+    }}
+  }}
+
+  * {{ box-sizing: border-box; }}
   body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-                 "Helvetica Neue", Arial, sans-serif;
-    max-width: 1180px; margin: 2em auto; padding: 0 1em; color: #222;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    background: var(--bg);
+    color: var(--text-body);
+    margin: 0; padding: 0;
+    line-height: 1.5;
   }}
-  h1 {{ font-size: 1.6em; margin-bottom: 0.2em; }}
-  .subhead {{ color: #666; font-size: 0.9em; margin-bottom: 1.5em; }}
+  .page {{ max-width: 1240px; margin: 0 auto; padding: 1.5rem 1.5rem 3rem; }}
+
+  /* Header */
+  .topbar {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.5rem;
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 5;
+    backdrop-filter: blur(8px);
+  }}
+  .brand {{ display: flex; align-items: center; gap: 0.7rem; }}
+  .brand-mark {{
+    width: 34px; height: 34px;
+    display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--tone-a) 0%, var(--tone-b) 100%);
+    border-radius: 9px;
+    color: white; font-weight: 700;
+    box-shadow: var(--elev-1);
+  }}
+  .brand-name {{ font-weight: 600; font-size: 1rem; color: var(--text-strong); }}
+  .brand-sub  {{ font-size: 0.78rem; color: var(--text-muted); }}
+  .topbar-stamp {{ font-size: 0.85rem; color: var(--text-muted); }}
+  .theme-toggle {{
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.45rem 0.85rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent; color: var(--text-body);
+    font: inherit; font-size: 0.85rem; cursor: pointer;
+  }}
+  .theme-toggle:hover {{ background: var(--surface-2); }}
+
+  /* Sections */
+  h1 {{
+    font-size: 1.6rem; font-weight: 600; letter-spacing: -0.01em;
+    color: var(--text-strong); margin: 0;
+  }}
   h2 {{
-    font-size: 1.1em; margin-top: 2.2em; margin-bottom: 0.4em;
-    border-bottom: 1px solid #ddd; padding-bottom: 0.25em;
+    font-size: 0.8rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin: 2.2rem 0 0.7rem;
   }}
-  h3 {{ font-size: 0.95em; margin: 1em 0 0.4em 0; color: #444; }}
+  h3 {{ font-size: 0.95rem; font-weight: 600; color: var(--text-strong); margin: 0 0 0.45rem; }}
+  p {{ margin: 0 0 0.5rem; }}
+
+  .card {{
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.1rem 1.2rem;
+    box-shadow: var(--elev-1);
+  }}
+
+  .output-banner {{
+    display: flex;
+    gap: 0.6rem;
+    align-items: baseline;
+    background: var(--primary-soft);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--primary);
+    border-radius: var(--radius-sm);
+    padding: 0.6rem 0.85rem;
+    margin: 0 0 1.1rem;
+    font-size: 0.88rem;
+  }}
+  .output-banner .label {{
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }}
+  .output-banner .path {{
+    color: var(--text-strong);
+    word-break: break-all;
+  }}
+
   table {{
-    border-collapse: collapse; margin-top: 0.4em; width: 100%;
-    font-size: 0.92em;
+    border-collapse: separate; border-spacing: 0;
+    width: 100%; font-size: 0.9rem;
   }}
-  th, td {{
-    padding: 0.4em 0.7em; text-align: left;
-    border-bottom: 1px solid #eee; vertical-align: top;
+  th {{
+    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--text-muted);
+    padding: 0.55rem 0.75rem; text-align: left;
+    border-bottom: 1px solid var(--divider);
   }}
-  th {{ background: #f6f6f6; font-weight: 600; }}
-  tr:nth-child(even) td {{ background: #fafafa; }}
+  td {{
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--divider);
+    vertical-align: top;
+    color: var(--text-body);
+  }}
+  tr:last-child td {{ border-bottom: none; }}
   .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-  .match {{ color: #1f7a1f; font-weight: 600; }}
-  .mismatch {{ color: #b04040; font-weight: 600; }}
-  .y {{ color: #1f7a1f; font-weight: 600; text-align: center; }}
-  .n {{ color: #b04040; font-weight: 600; text-align: center; }}
-  .blank {{ color: #ccc; text-align: center; }}
   .code {{
-    font-family: ui-monospace, SFMono-Regular, "Menlo", Consolas, monospace;
-    font-size: 0.88em; word-break: break-all;
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo,
+                 Consolas, monospace;
+    font-size: 0.86em;
   }}
-  .sxs {{ display: flex; gap: 1.2em; }}
-  .sxs > div {{ flex: 1; min-width: 0; }}
-  .sxs h3 {{
-    margin-top: 0; padding-bottom: 0.2em; border-bottom: 1px solid #ddd;
+
+  /* Side-by-side layout cards */
+  .sxs {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }}
+  .sxs > div {{
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.1rem;
+    box-shadow: var(--elev-1);
   }}
+  .sxs h3 {{ padding-bottom: 0.4rem; border-bottom: 1px solid var(--divider); }}
+
   .meta dt {{
-    font-weight: 600; color: #555; float: left; clear: left;
-    width: 9em; margin-right: 0.5em;
+    font-weight: 500; color: var(--text-muted); float: left; clear: left;
+    width: 8.5em; margin-right: 0.6rem; font-size: 0.85rem;
   }}
-  .meta dd {{ margin-left: 9.5em; margin-bottom: 0.2em; }}
-  .field-list {{ font-size: 0.85em; padding-left: 1em; margin: 0.2em 0 0.6em 0; }}
-  .field-list li {{ margin: 0.1em 0; list-style: disc; }}
-  .field-list .ex {{ color: #999; font-style: italic; }}
-  .field-list .key {{ color: #1a5bb8; font-weight: 600; }}
-  .sample-note {{ color: #666; font-size: 0.85em; margin-top: 0.5em; }}
-  a.fileref {{ color: #1a5bb8; text-decoration: none; }}
-  a.fileref:hover {{ text-decoration: underline; }}
-  .desc {{ font-size: 0.82em; color: #555; }}
+  .meta dd {{ margin-left: 9em; margin-bottom: 0.25rem; font-size: 0.88rem; }}
+  /* Per-segment cards (matches the dashboard SegmentEditor look). */
+  .seg-stack {{ display: flex; flex-direction: column; gap: 0.55rem; margin-top: 0.4rem; }}
+  .seg-card {{
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.55rem 0.75rem 0.4rem;
+  }}
+  .seg-head {{
+    display: flex; align-items: center; gap: 0.5rem;
+    margin-bottom: 0.3rem;
+  }}
+  .seg-name {{
+    font-weight: 600; font-size: 0.9rem; color: var(--text-strong);
+  }}
+  .seg-size {{
+    margin-left: auto; font-size: 0.78rem; color: var(--text-muted);
+  }}
+  .seg-size strong {{ color: var(--text-strong); font-weight: 600; }}
+  .role-pill {{
+    font-size: 0.62rem; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 0.1rem 0.5rem; border-radius: 999px;
+  }}
+  .role-pill.key {{ background: var(--primary-soft); color: var(--primary); }}
+  .role-pill.end {{ background: var(--surface-3); color: var(--text-muted); }}
+
+  table.fields-table {{ font-size: 0.83rem; }}
+  table.fields-table th {{
+    font-size: 0.62rem; padding: 0.25rem 0.5rem;
+  }}
+  table.fields-table td {{
+    padding: 0.28rem 0.5rem;
+    border-bottom: 1px solid var(--divider);
+  }}
+  table.fields-table tr:last-child td {{ border-bottom: none; }}
+  table.fields-table .field-cell {{ display: flex; align-items: center; gap: 0.4rem; }}
+  table.fields-table .field-name {{
+    font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.82rem; color: var(--text-strong);
+  }}
+  .key-badge {{
+    background: var(--primary-soft); color: var(--primary);
+    padding: 0.05rem 0.4rem; border-radius: 999px;
+    font-size: 0.58rem; font-weight: 700; letter-spacing: 0.05em;
+  }}
+  .excl-yes {{ color: var(--mismatch); font-weight: 600; }}
+  .excl-no  {{ color: var(--text-muted); opacity: 0.7; }}
+
+  /* Counts table */
+  .desc {{ font-size: 0.82rem; color: var(--text-muted); max-width: 32em; }}
+  .match {{ color: var(--match); font-weight: 600; }}
+  .mismatch {{ color: var(--mismatch); font-weight: 600; }}
+
+  /* Per-key matrix */
+  .y {{
+    color: var(--match); font-weight: 700; text-align: center;
+    background: var(--match-soft); border-radius: 4px;
+  }}
+  .n {{
+    color: var(--mismatch); font-weight: 700; text-align: center;
+    background: var(--mismatch-soft); border-radius: 4px;
+  }}
+  .blank {{ color: var(--text-muted); opacity: 0.4; text-align: center; }}
+  .sample-note {{ color: var(--text-muted); font-size: 0.85rem; margin-top: 0.6rem; }}
+
+  /* File-link styling */
+  a.fileref {{
+    color: var(--primary); text-decoration: none; font-weight: 500;
+    border-bottom: 1px dashed transparent;
+  }}
+  a.fileref:hover {{ border-bottom-color: var(--primary); }}
 </style>
+<script>
+  // Honor ?theme=dark|light in the URL so the parent UI can preserve
+  // its theme when it opens the report in a new tab. The page also
+  // respects prefers-color-scheme by default.
+  (function () {{
+    var params = new URLSearchParams(window.location.search);
+    var t = params.get('theme');
+    if (t === 'dark' || t === 'light') {{
+      document.documentElement.setAttribute('data-theme', t);
+    }}
+  }})();
+  function toggleTheme() {{
+    var html = document.documentElement;
+    var current = html.getAttribute('data-theme');
+    if (!current) {{
+      // No explicit override yet — flip relative to OS preference.
+      var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      current = prefersDark ? 'dark' : 'light';
+    }}
+    html.setAttribute('data-theme', current === 'dark' ? 'light' : 'dark');
+  }}
+</script>
 </head>
 <body>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">SC</div>
+    <div>
+      <div class="brand-name">Segment Compare · Report</div>
+      <div class="brand-sub">Run <span class="code">{e(stamp)}</span></div>
+    </div>
+  </div>
+  <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"
+         xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M12 3a9 9 0 1 0 9 9c-.5 0-.9 0-1.4-.1A7 7 0 1 1
+               12.1 4.4 9 9 0 0 0 12 3z"/>
+    </svg>
+    Theme
+  </button>
+</header>
+
+<main class="page">
 <h1>Compare report</h1>
-<div class="subhead">Run <span class="code">{e(stamp)}</span></div>
+
+<div class="output-banner">
+  <span class="label">Output dir</span>
+  <span class="path code">{e(str(path.parent))}</span>
+</div>
 
 <h2>Layouts</h2>
 {layouts_html}
 
 <h2>Inputs</h2>
-{inputs_html}
+<div class="card">{inputs_html}</div>
 
 <h2>Aggregate counts</h2>
-{counts_html}
+<div class="card">{counts_html}</div>
 
 <h2>Per-segment breakdown</h2>
-{per_segment_html}
+<div class="card">{per_segment_html}</div>
 
 <h2>Per-key mismatch sample</h2>
-{matrix_sample_html}
+<div class="card">{matrix_sample_html}</div>
 
 <h2>Timing</h2>
-{timing_html}
+<div class="card">{timing_html}</div>
 
 <h2>Config provenance</h2>
-{config_paths_html}
+<div class="card">{config_paths_html}</div>
 
+</main>
 </body>
 </html>
 """
@@ -736,31 +1023,49 @@ def _render_one_layout(title: str, layout: "FileLayout", e: "Any") -> str:
         "</dl>"
     )
 
-    segments_html_parts = [
-        f"<h3>{e(title)} segments</h3><table>",
-        "<tr><th>Segment</th><th class='num'>Size</th><th>Fields</th></tr>",
-    ]
+    segments_html_parts = [f"<h3>{e(title)} segments</h3>", '<div class="seg-stack">']
     for seg in layout.segments:
-        field_list_parts = ['<ul class="field-list">']
+        role_pill = ""
+        if seg.role == "key":
+            role_pill = '<span class="role-pill key">key</span>'
+        elif seg.role == "end":
+            role_pill = '<span class="role-pill end">end</span>'
+
+        rows_html_parts = []
         for fld in seg.fields:
-            extras = []
-            if fld.key:
-                extras.append('<span class="key">KEY</span>')
-            if fld.exclude:
-                extras.append('<span class="ex">exclude</span>')
-            extras_str = (" — " + ", ".join(extras)) if extras else ""
-            field_list_parts.append(
-                f"<li><span class='code'>{e(fld.name)}</span>"
-                f" ({fld.length} bytes){extras_str}</li>"
+            key_badge = '<span class="key-badge">KEY</span>' if fld.key else ""
+            excl_html = (
+                '<span class="excl-yes">✓</span>'
+                if fld.exclude
+                else '<span class="excl-no">—</span>'
             )
-        field_list_parts.append("</ul>")
-        fields_cell = "".join(field_list_parts)
-        segments_html_parts.append(
-            f"<tr><td class='code'>{e(seg.name)}</td>"
-            f"<td class='num'>{seg.size}</td>"
-            f"<td>{fields_cell}</td></tr>"
+            rows_html_parts.append(
+                "<tr>"
+                f"<td><span class='field-cell'>"
+                f"<span class='field-name'>{e(fld.name)}</span>{key_badge}"
+                f"</span></td>"
+                f"<td class='num'>{fld.length}</td>"
+                f"<td class='num'>{excl_html}</td>"
+                "</tr>"
+            )
+        fields_table = (
+            "<table class='fields-table'>"
+            "<tr><th>Field</th><th class='num'>Length</th>"
+            "<th class='num'>Exclude</th></tr>"
+            f"{''.join(rows_html_parts)}"
+            "</table>"
         )
-    segments_html_parts.append("</table>")
+        segments_html_parts.append(
+            "<div class='seg-card'>"
+            "<div class='seg-head'>"
+            f"<span class='seg-name code'>{e(seg.name)}</span>"
+            f"{role_pill}"
+            f"<span class='seg-size'>Size <strong>{seg.size}</strong></span>"
+            "</div>"
+            f"{fields_table}"
+            "</div>"
+        )
+    segments_html_parts.append("</div>")
     segments_html = "".join(segments_html_parts)
 
     return f"<h3>{e(title)} — overview</h3>{meta_html}{segments_html}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -479,9 +480,15 @@ def test_compare_reports_html_is_self_contained_and_well_formed(tmp_path: Path) 
     text = path.read_text(encoding="utf-8")
     assert text.startswith("<!DOCTYPE html>")
     assert "</html>" in text
-    # No external CSS or JS — everything must be inline.
-    assert "<link " not in text
-    assert "<script" not in text
+    # Inline CSS only; any <link> is the Google Fonts stylesheet (progressive
+    # enhancement — the file still renders fine offline with system fonts).
+    # Any <script> is the inline theme-toggle helper (~25 lines). No external
+    # JS bundles must be loaded.
+    for link in re.findall(r"<link [^>]*>", text):
+        assert (
+            "fonts.googleapis.com" in link or "fonts.gstatic.com" in link
+        ), f"unexpected external link: {link}"
+    assert "<script src=" not in text
     # Section headings present (Layouts and Per-key mismatch sample are new).
     for heading in (
         "Layouts",
