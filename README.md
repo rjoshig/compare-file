@@ -342,24 +342,36 @@ For the full step-by-step explanation of what happens between
 ## Web UI (Phase 3)
 
 A FastAPI backend wraps the same engine; a Vue 3 + Vite frontend talks to it.
-Run them in **two terminals**.
+You must run **both**, in **two separate terminals** — the frontend alone just
+shows a "Loading…" spinner because it has no backend to fetch from.
 
-**1. Backend (FastAPI on `:8000`).** Install the API extra once, then launch:
+**1. Backend (FastAPI on `:8000`).** Install the API extra once, then launch.
+
+Mac / Linux:
 
 ```bash
-# from the repo root, with your venv active
+source .venv/bin/activate
 pip install -e ".[api]"                 # one-time: fastapi, uvicorn, pydantic
-uvicorn segment_compare.api.main:app --reload --port 8000
+python -m uvicorn segment_compare.api.main:app --reload --port 8000
 ```
 
-`/api/health` should return `{"status":"ok"}`; interactive API docs are at
-`http://localhost:8000/docs`.
+Windows (PowerShell):
+
+```powershell
+.venv\Scripts\Activate.ps1
+pip install -e ".[api]"                 # one-time
+python -m uvicorn segment_compare.api.main:app --reload --port 8000
+```
+
+Verify it's up: open **http://localhost:8000/api/health** → `{"status":"ok"}`
+(interactive API docs at `http://localhost:8000/docs`). **Leave this terminal
+running.**
 
 **2. Frontend (Vite dev server on `:5173`).** In a second terminal:
 
 ```bash
 cd ui
-npm install        # one-time
+npm install        # one-time (needs Node.js 18+)
 npm run dev        # serves http://localhost:5173
 ```
 
@@ -367,6 +379,20 @@ Open **http://localhost:5173**. The dev server proxies `/api/*` to the backend
 on `:8000`, so no CORS setup is needed. Pick your two input files, set a key
 field, choose an output directory, and **Save & Run**; the **Results** and
 **Run History** views read the runs back from that output directory.
+
+### Troubleshooting: the UI is stuck on "Loading…"
+
+The dashboard loads its segment templates from the backend on startup, so a
+permanent "Loading…" almost always means **the backend isn't reachable**:
+
+- Is **Terminal 1** (uvicorn) actually running, with no error, on port 8000?
+  Confirm `http://localhost:8000/api/health` returns `{"status":"ok"}` in a
+  browser. If that URL fails, the backend is the problem — not the UI.
+- Forgot `pip install -e ".[api]"`? `uvicorn`/`fastapi` won't be found.
+- Backend on a different port? Either run it on `8000`, or change the proxy
+  target in `ui/vite.config.js` (`server.proxy['/api'].target`) to match.
+- Started the frontend before the backend? Hard-refresh the page (Ctrl+F5)
+  once the backend is up.
 
 **Optional config** (`ui/.env`, shown by default — set to `false` to hide a nav
 item; restart `npm run dev` after editing):
