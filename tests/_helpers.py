@@ -19,7 +19,15 @@ keep using the real ``config/`` directory directly.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
+
+from segment_compare.writer import RUN_DIR_FORMAT
+
+
+def run_dir_for(ts: datetime) -> str:
+    """Compute the per-run subdirectory name for a fixed test timestamp (ADR-037)."""
+    return ts.strftime(RUN_DIR_FORMAT)
 
 
 def minimal_layout() -> dict:

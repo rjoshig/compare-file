@@ -1278,6 +1278,122 @@ doesn't need to change.
 
 ---
 
+## ADR-037 — Per-run output subdirectory; bare filenames inside
+
+**Status:** accepted; supersedes ADR-027 on filename stamping
+
+**Context:** ADR-027 disambiguated successive runs by injecting a
+``YYYYMMDDHHMM`` stamp into every output filename
+(``matches_202605290428.dat``, ``summary_202605290428.json``, etc.).
+That worked but flattened multiple runs into one directory, made
+``ls`` output noisy, and ran two runs in the same minute into
+collisions.
+
+**Decision:** Each invocation of ``pipeline.run`` /
+``pipeline.run_parallel`` creates its own subdirectory under
+``--output-dir``:
+
+```
+results/
+└── report-2026-05-29-04-28-15/
+    ├── matches.dat
+    ├── mismatches.dat
+    ├── keymismatch_A.dat
+    ├── keymismatch_B.dat
+    ├── dups_A.dat
+    ├── dups_B.dat
+    ├── report.csv
+    ├── summary.json
+    ├── compare_reports.csv
+    ├── compare_reports.html
+    └── keys_mismatch_matrix.csv
+```
+
+- Subdirectory name format: ``report-%Y-%m-%d-%H-%M-%S`` (UTC).
+  Seconds resolution removes ADR-027's same-minute collision risk.
+- Files inside use **bare** names. The subdirectory provides the
+  disambiguation; embedding the stamp in filenames as well would be
+  redundant.
+- ``Summary.filename_stamp`` (the field name is retained for
+  backward compatibility of ``summary.json``'s schema) carries the
+  subdirectory name. So ``filename_stamp`` is now
+  ``"report-2026-05-29-04-28-15"`` rather than
+  ``"202605290428"``.
+- The HTML report's clickable file links and the CSV's
+  ``output_files`` section reference bare names; both files live in
+  the same per-run directory so relative links resolve naturally.
+- The parallel ``_workers/`` scratch tree lives inside the per-run
+  directory too, keeping a single run self-contained on disk.
+
+**Consequences:**
+
+- ``ls results/`` shows one directory per run instead of N×11 files.
+- Two consecutive runs are guaranteed not to collide even within the
+  same minute.
+- Wired through ``pipeline.run`` and ``pipeline.run_parallel``;
+  ``OutputWriter`` retains its ``filename_stamp`` parameter for tests
+  that exercise it directly, but the pipeline now passes ``""``.
+- All test helpers updated: ``tests/_helpers.py`` exposes a
+  ``run_dir_for(ts)`` helper; pipeline / external_sort / parallel /
+  main tests reach into ``out / FIXED_RUN_DIR / base`` instead of the
+  old ``out / matches_<stamp>.dat``.
+- ADR-027 is superseded on the filename-stamping rule. The 12-char
+  stamp format ``%Y%m%d%H%M`` still exists in the codebase but is
+  only used internally for the external-sort temp files in
+  ``runtime.sort_temp_dir``, which sit outside the per-run output
+  directory.
+
+---
+
+## ADR-038 — ``matches.dat`` is a sample; ``mismatches.dat`` stays full
+
+**Status:** accepted
+
+**Context:** Operators reviewing run outputs want quick spot-checks
+of what matched in addition to full diagnostic detail on what did
+not. At 3M records per file, a fully matched run produces a
+``matches.dat`` of ~1 GB — too large to be useful as a spot-check
+artifact, and providing nothing the per-segment / per-key reports
+don't already summarize.
+
+**Decision:** ``matches.dat`` is sampled; ``mismatches.dat`` is full.
+
+- ``writer.MATCHES_SAMPLE_SIZE = 10`` caps the number of matched
+  records written to ``matches.dat``. Aggregate counts
+  (``Summary.records_matched``, the per-segment match counts, the
+  HTML's "Records matched" cell) continue to reflect the **true**
+  number of matched records.
+- Single-process: the ``write_match`` call is gated on
+  ``records_matched < MATCHES_SAMPLE_SIZE``; the counter still
+  increments unconditionally.
+- Parallel: each worker writes every match it sees into its per-
+  worker ``matches.dat`` (workers don't coordinate). The master
+  process post-merges and truncates the concatenated file to
+  ``MATCHES_SAMPLE_SIZE`` records using the configured record
+  delimiter as boundary. Truncation is a no-op when the delimiter
+  is empty (back-to-back records) or when the file is already at
+  or below the cap.
+- ``mismatches.dat`` carries every mismatched record (side-by-side
+  diagnostic blocks) — unchanged from before.
+
+**Consequences:**
+
+- ``matches.dat`` stays small regardless of input size.
+- The aggregate ``records_matched`` count is still honest for
+  downstream tooling; only the on-disk artifact is truncated.
+- Future config knob (deferred): make the cap a per-run setting in
+  ``runtime.json`` or a CLI flag (``--matches-sample N``,
+  ``--mismatches-sample N``). For now it's a constant.
+- The parallel and single-process paths still produce byte-identical
+  ``matches.dat`` (both end up at ≤ 10 records). The pre-existing
+  ``test_parallel_output_matches_single_process`` parametric test
+  continues to enforce that.
+- One new pipeline test pins the cap: generate 15 identical records,
+  assert ``records_matched == 15`` and the on-disk file contains
+  exactly 10 records.
+
+---
+
 ## ADR-033 — Single per-file layout config replaces segments.json + normalization.json
 
 **Status:** accepted (Stage 1: schema landed); supersedes **ADR-007**

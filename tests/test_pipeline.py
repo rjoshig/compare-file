@@ -11,11 +11,11 @@ import pytest
 from segment_compare.config import load_config
 from segment_compare.parser import iter_records
 from segment_compare.pipeline import InputFileError, run
-from segment_compare.writer import stamped_filename
 
 from tests._helpers import (
     make_synthetic_record as _make_record,
     minimal_layout,
+    run_dir_for,
     write_minimal_config_dir,
 )
 
@@ -26,10 +26,12 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 # predictable. The realistic-sample test uses a different stamp on purpose.
 FIXED_TS = datetime(2026, 5, 27, 22, 39, tzinfo=timezone.utc)
 FIXED_STAMP = "202605272239"
+FIXED_RUN_DIR = run_dir_for(FIXED_TS)
 
 
 def _stamped(out: Path, base: str, stamp: str = FIXED_STAMP) -> Path:
-    return out / stamped_filename(base, stamp)
+    """Resolve an output file's path inside the per-run subdir (ADR-037)."""
+    return out / FIXED_RUN_DIR / base
 
 
 def _write_file(path: Path, records: list[bytes]) -> None:
@@ -64,7 +66,7 @@ def test_run_against_sample_files_matches_oracle(tmp_path: Path) -> None:
         run_timestamp=FIXED_TS,
     )
 
-    assert summary.filename_stamp == FIXED_STAMP
+    assert summary.filename_stamp == FIXED_RUN_DIR
     assert summary.file_a_record_count == 10
     assert summary.file_b_record_count == 11
     # A good_index keys: {01, 02, 03, 04, 05, 06, 10, 11} (08 dropped — dup)
@@ -111,7 +113,7 @@ def test_run_against_sample_files_matches_oracle(tmp_path: Path) -> None:
     assert summary_data["records_matched"] == 4
     assert summary_data["records_mismatched"] == 3
     assert summary_data["config_audit_hash"] == config.audit_hash
-    assert summary_data["filename_stamp"] == FIXED_STAMP
+    assert summary_data["filename_stamp"] == FIXED_RUN_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +387,30 @@ def test_run_with_rdw_prefixed_file_a_matches_plain_file_b(tmp_path: Path) -> No
     assert summary.records_mismatched == 0
 
 
+def test_matches_dat_capped_at_sample_size(tmp_path: Path) -> None:
+    """matches.dat carries at most MATCHES_SAMPLE_SIZE records; counter stays exact (ADR-038)."""
+    from segment_compare.writer import MATCHES_SAMPLE_SIZE
+
+    # Generate enough identical records to exceed the cap.
+    n_records = MATCHES_SAMPLE_SIZE + 5
+    records = [_make_record(f"KEY{i:09d}") for i in range(1, n_records + 1)]
+    _write_file(tmp_path / "a.dat", records)
+    _write_file(tmp_path / "b.dat", records)
+
+    summary = run(
+        tmp_path / "a.dat",
+        tmp_path / "b.dat",
+        load_config(write_minimal_config_dir(tmp_path)),
+        tmp_path / "out",
+        run_timestamp=FIXED_TS,
+    )
+    # The counter reflects every matched record (truthful for downstream).
+    assert summary.records_matched == n_records
+    # The on-disk *.dat is truncated to the sample size.
+    matches_bytes = _stamped(tmp_path / "out", "matches.dat").read_bytes()
+    assert matches_bytes.count(b"\n") == MATCHES_SAMPLE_SIZE
+
+
 def test_segment_aliases_ad01_after_em01_compared_as_emad(tmp_path: Path) -> None:
     """ADR-034 end-to-end: AD01 after EM01 should bucket as EMAD, not AD01.
 
@@ -553,7 +579,6 @@ def test_default_timestamp_used_when_run_timestamp_omitted(tmp_path: Path) -> No
         load_config(write_minimal_config_dir(tmp_path)),
         out,
     )
-    # 12-digit YYYYMMDDHHMM stamp
-    assert len(summary.filename_stamp) == 12
-    assert summary.filename_stamp.isdigit()
-    assert (out / f"matches_{summary.filename_stamp}.dat").exists()
+    # Run-dir name shape: "report-YYYY-MM-DD-HH-MM-SS" (ADR-037).
+    assert summary.filename_stamp.startswith("report-")
+    assert (out / summary.filename_stamp / "matches.dat").exists()

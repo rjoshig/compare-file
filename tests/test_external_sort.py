@@ -11,11 +11,10 @@ from segment_compare.config import EngineConfig, load_config
 from segment_compare.external_sort import external_sort_file
 from segment_compare.parser import iter_records
 from segment_compare.pipeline import run
-from segment_compare.writer import stamped_filename
-
 from tests._helpers import (
     make_synthetic_record,
     minimal_layout,
+    run_dir_for,
     write_minimal_config_dir,
 )
 
@@ -25,10 +24,12 @@ EXAMPLES = REPO_ROOT / "examples"
 
 FIXED_TS = datetime(2026, 5, 28, 0, 0, tzinfo=timezone.utc)
 FIXED_STAMP = "202605280000"
+FIXED_RUN_DIR = run_dir_for(FIXED_TS)
 
 
 def _stamped(out: Path, base: str) -> Path:
-    return out / stamped_filename(base, FIXED_STAMP)
+    """Path to a per-run output file inside ADR-037's run subdir."""
+    return out / FIXED_RUN_DIR / base
 
 
 def _read_keys(path: Path, config: EngineConfig) -> list[str]:

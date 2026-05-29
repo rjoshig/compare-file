@@ -29,12 +29,12 @@ See `docs/architecture.md` for the full spec.
 
 ## What the tool produces
 
-Eleven output files per run, written to a run-specific output directory:
+Each run creates its own subdirectory `report-YYYY-MM-DD-HH-MM-SS` under `--output-dir` (ADR-037). Inside it, eleven output files with bare names:
 
 | File | Contents |
 |---|---|
-| `matches.dat` | Records matching in both files |
-| `mismatches.dat` | Records differing on at least one segment (side-by-side) |
+| `matches.dat` | Sample of up to 10 records matching in both files (capped per ADR-038); the `summary.json` `records_matched` count still reflects the true total |
+| `mismatches.dat` | Every record differing on at least one segment (side-by-side) |
 | `keymismatch_A.dat` | Keys only in File A |
 | `keymismatch_B.dat` | Keys only in File B |
 | `dups_A.dat` | Duplicate-key records pulled from File A |
@@ -45,7 +45,7 @@ Eleven output files per run, written to a run-specific output directory:
 | `compare_reports.html` | Same aggregates rendered as a self-contained HTML page with side-by-side layouts, file-link aggregate counts, and a 20-row sample of the key matrix (ADR-035 / ADR-036) |
 | `keys_mismatch_matrix.csv` | Per-key Y/N matrix of which segments mismatched; one row per joined-key record with at least one segment mismatch + last column listing segments with count differences (ADR-036) |
 
-All filenames are stamped `<base>_YYYYMMDDHHMM.<ext>` (UTC) per ADR-027 — so successive runs in the same directory don't clobber each other.
+Successive runs land in independent `report-…` subdirectories (per ADR-037), so they never clobber each other. ADR-027's old `<base>_YYYYMMDDHHMM.<ext>` stamp-in-filename scheme is superseded — the subdirectory provides the disambiguation now.
 
 ## Project status
 

@@ -73,6 +73,16 @@ METRIC_TO_FILE: dict[str, str] = {
 REPORT_HEADER = ("key", "segment_name", "status", "a_count", "b_count")
 
 STAMP_FORMAT = "%Y%m%d%H%M"
+# Per-run output directory format (ADR-037). Each run lives in its own
+# subdirectory under the operator's --output-dir; files inside are written
+# with bare names since the directory provides the disambiguation.
+RUN_DIR_FORMAT = "report-%Y-%m-%d-%H-%M-%S"
+
+# matches.dat is sampled: only the first N matched records get written
+# (ADR-038). The aggregate counts in summary.json continue to reflect
+# the true number of matched records; only the on-disk *.dat content is
+# truncated. mismatches.dat is unaffected — it keeps the full set.
+MATCHES_SAMPLE_SIZE = 10
 
 
 def stamped_filename(base: str, stamp: str) -> str:
@@ -475,7 +485,6 @@ def write_compare_reports_csv(reports: CompareReports, path: Path) -> None:
     and is trivially filterable with ``awk`` / ``grep``.
     """
     summary = reports.summary
-    stamp = summary.filename_stamp
 
     with path.open("w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
@@ -510,15 +519,14 @@ def write_compare_reports_csv(reports: CompareReports, path: Path) -> None:
             w.writerow(("per_segment", f"{seg.segment_name}.total_in_a", seg.total_in_a))
             w.writerow(("per_segment", f"{seg.segment_name}.total_in_b", seg.total_in_b))
 
-        # Output files — each count metric paired with the run-stamped
-        # file that holds the corresponding records (ADR-036).
+        # Output files — each count metric paired with the file that
+        # holds the corresponding records. Bare names since every output
+        # for one run lives inside the per-run subdir (ADR-037).
         for metric, base in METRIC_TO_FILE.items():
-            w.writerow(("output_files", metric, stamped_filename(base, stamp)))
-        w.writerow(("output_files", "report", stamped_filename(REPORT_FILE, stamp)))
-        w.writerow(("output_files", "summary", stamped_filename(SUMMARY_FILE, stamp)))
-        w.writerow(
-            ("output_files", "keys_mismatch_matrix", stamped_filename(KEY_MATRIX_FILE, stamp))
-        )
+            w.writerow(("output_files", metric, base))
+        w.writerow(("output_files", "report", REPORT_FILE))
+        w.writerow(("output_files", "summary", SUMMARY_FILE))
+        w.writerow(("output_files", "keys_mismatch_matrix", KEY_MATRIX_FILE))
 
         # Timing
         w.writerow(("timing", "start_time", summary.start_time))
@@ -643,7 +651,7 @@ def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
   .sample-note {{ color: #666; font-size: 0.85em; margin-top: 0.5em; }}
   a.fileref {{ color: #1a5bb8; text-decoration: none; }}
   a.fileref:hover {{ text-decoration: underline; }}
-  .hint {{ cursor: help; border-bottom: 1px dotted #aaa; }}
+  .desc {{ font-size: 0.82em; color: #555; }}
 </style>
 </head>
 <body>
@@ -785,7 +793,7 @@ def _render_inputs_side_by_side(summary: "Summary", e: "Any") -> str:
     )
 
 
-def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
+def _render_aggregate_counts(summary: "Summary", _stamp: str, e: "Any") -> str:
     """Counts table with a description + clickable file-link columns (ADR-036)."""
     rows = (
         (
@@ -851,18 +859,20 @@ def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
         base = METRIC_TO_FILE.get(metric_key)
         if base is None:
             return "—"
-        href = stamped_filename(base, stamp)
-        return f"<a class='fileref' href='{e(href)}'>{e(href)}</a>"
+        # Bare filename — HTML lives in the same per-run dir (ADR-037).
+        return f"<a class='fileref' href='{e(base)}'>{e(base)}</a>"
 
     rows_html = "".join(
-        f"<tr><td class='{css} hint' title='{e(desc)}'>{label}</td>"
+        f"<tr><td class='{css}'>{label}</td>"
+        f"<td class='desc'>{e(desc)}</td>"
         f"<td class='num'>{val:,}</td>"
         f"<td>{_file_cell(metric_key)}</td></tr>"
         for label, desc, val, css, metric_key in rows
     )
     return (
         "<table>"
-        "<tr><th>Metric</th><th class='num'>Value</th><th>File</th></tr>"
+        "<tr><th>Metric</th><th>Description</th>"
+        "<th class='num'>Value</th><th>File</th></tr>"
         f"{rows_html}"
         "</table>"
     )
@@ -889,12 +899,12 @@ def _render_per_segment(summary: "Summary", e: "Any") -> str:
 def _render_key_matrix_sample(
     entries: tuple[KeyMatrixEntry, ...],
     segments: tuple[str, ...],
-    stamp: str,
+    _stamp: str,
     e: "Any",
 ) -> str:
     """First ~20 rows of the per-key mismatch matrix, with a link to the full file."""
-    full_file = stamped_filename(KEY_MATRIX_FILE, stamp)
-    full_link = f"<a class='fileref' href='{e(full_file)}'>{e(full_file)}</a>"
+    # Bare filename — HTML lives in the same per-run dir (ADR-037).
+    full_link = f"<a class='fileref' href='{e(KEY_MATRIX_FILE)}'>{e(KEY_MATRIX_FILE)}</a>"
 
     if not entries:
         return (

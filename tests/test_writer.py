@@ -438,10 +438,13 @@ def test_compare_reports_csv_covers_every_summary_section(tmp_path: Path) -> Non
             assert f"per_segment,{seg}.{stat}," in text, f"missing per_segment row {seg}.{stat}"
 
     # New ADR-036 rows: every count metric paired with its stamped output file.
-    assert "output_files,records_matched,matches_202605280100.dat\n" in text
-    assert "output_files,records_mismatched,mismatches_202605280100.dat\n" in text
-    assert "output_files,dups_in_a,dups_A_202605280100.dat\n" in text
-    assert "output_files,keys_mismatch_matrix,keys_mismatch_matrix_202605280100.csv\n" in text
+    # ADR-037: output_files rows carry bare filenames; every run's files
+    # live inside its own per-run subdirectory so disambiguation by stamp
+    # in the filenames is no longer needed.
+    assert "output_files,records_matched,matches.dat\n" in text
+    assert "output_files,records_mismatched,mismatches.dat\n" in text
+    assert "output_files,dups_in_a,dups_A.dat\n" in text
+    assert "output_files,keys_mismatch_matrix,keys_mismatch_matrix.csv\n" in text
 
     # Config-paths rows preserve the known layout_a / layout_b / runtime order.
     rows = text.splitlines()
@@ -508,25 +511,21 @@ def test_compare_reports_html_layouts_section_is_side_by_side(tmp_path: Path) ->
     assert text.count("ENDS") >= 4
 
 
-def test_compare_reports_html_aggregate_counts_descriptions_are_tooltips(
+def test_compare_reports_html_aggregate_counts_has_description_column(
     tmp_path: Path,
 ) -> None:
-    """Each metric label carries its description as a hover tooltip (title attr)."""
+    """Aggregate counts row carries a small-font description column."""
     path = tmp_path / "reports.html"
     summary = _multi_segment_summary(tmp_path)
     write_compare_reports_html(_reports(summary, tmp_path), path)
     text = path.read_text(encoding="utf-8")
 
     aggregate_section = text.split("<h2>Aggregate counts</h2>")[1].split("</table>")[0]
-    # No separate Description column header.
-    assert "<th>Description</th>" not in aggregate_section
-    # Descriptions ride as title= attributes on the metric cells.
-    assert "title='Records found in both files with identical content.'" in aggregate_section
-    assert "title='Records found only in File A, not in File B.'" in aggregate_section
-    # The hoverable cells carry the hint class so the dotted underline +
-    # help cursor signal "hover me" to readers.
-    assert "hint" in aggregate_section
-    # No jargon leak in tooltip text.
+    # Description renders as a dedicated column with the small-font .desc class.
+    assert "<th>Description</th>" in aggregate_section
+    assert "class='desc'>Records found in both files with identical content." in aggregate_section
+    assert "class='desc'>Records found only in File A, not in File B." in aggregate_section
+    # No jargon leak in description text.
     for jargon in ("hash", "multiset", "inner-join", "ADR-019"):
         assert (
             jargon not in aggregate_section
@@ -534,18 +533,19 @@ def test_compare_reports_html_aggregate_counts_descriptions_are_tooltips(
 
 
 def test_compare_reports_html_aggregate_counts_link_to_output_files(tmp_path: Path) -> None:
-    """Each count metric's row must include a clickable link to its stamped output file."""
+    """Each count metric's row must include a clickable link to its bare output file."""
     path = tmp_path / "reports.html"
     summary = _multi_segment_summary(tmp_path)
     write_compare_reports_html(_reports(summary, tmp_path), path)
     text = path.read_text(encoding="utf-8")
+    # ADR-037: links carry bare names since the HTML lives in the per-run dir.
     for fragment in (
-        "matches_202605280100.dat",
-        "mismatches_202605280100.dat",
-        "keymismatch_A_202605280100.dat",
-        "keymismatch_B_202605280100.dat",
-        "dups_A_202605280100.dat",
-        "dups_B_202605280100.dat",
+        "matches.dat",
+        "mismatches.dat",
+        "keymismatch_A.dat",
+        "keymismatch_B.dat",
+        "dups_A.dat",
+        "dups_B.dat",
     ):
         assert f"href='{fragment}'" in text, f"missing link to {fragment}"
 
@@ -571,8 +571,8 @@ def test_compare_reports_html_per_key_sample_renders_and_links_to_full_matrix(
     assert "class='n'>N<" in text
     # segment_count_mismatch pipe-delimited entry.
     assert ">TR01<" in text
-    # Sample notes references the full file with stamped name.
-    assert "keys_mismatch_matrix_202605280100.csv" in text
+    # Sample-note link points at the bare matrix file (ADR-037).
+    assert "href='keys_mismatch_matrix.csv'" in text
 
 
 def test_compare_reports_html_renders_metric_values(tmp_path: Path) -> None:

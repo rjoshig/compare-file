@@ -19,7 +19,8 @@ import pytest
 
 from segment_compare.config import load_config
 from segment_compare.pipeline import run, run_parallel
-from segment_compare.writer import stamped_filename
+
+from tests._helpers import run_dir_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO_ROOT / "config"
@@ -29,10 +30,12 @@ EXAMPLES = REPO_ROOT / "examples"
 # single-process and parallel runs in the same test.
 FIXED_TS = datetime(2026, 5, 28, 0, 0, tzinfo=timezone.utc)
 FIXED_STAMP = "202605280000"
+FIXED_RUN_DIR = run_dir_for(FIXED_TS)
 
 
 def _stamped(out: Path, base: str) -> Path:
-    return out / stamped_filename(base, FIXED_STAMP)
+    """Path to a per-run output file inside ADR-037's run subdir."""
+    return out / FIXED_RUN_DIR / base
 
 
 @pytest.mark.parametrize("workers", [1, 2, 4])
@@ -126,11 +129,11 @@ def test_run_parallel_writes_summary_json_with_stamp(tmp_path: Path) -> None:
         workers=2,
         run_timestamp=FIXED_TS,
     )
-    assert (out / stamped_filename("summary.json", FIXED_STAMP)).exists()
-    assert (out / stamped_filename("compare_reports.csv", FIXED_STAMP)).exists()
-    assert (out / stamped_filename("compare_reports.html", FIXED_STAMP)).exists()
-    assert (out / stamped_filename("keys_mismatch_matrix.csv", FIXED_STAMP)).exists()
-    assert summary.filename_stamp == FIXED_STAMP
+    assert _stamped(out, "summary.json").exists()
+    assert _stamped(out, "compare_reports.csv").exists()
+    assert _stamped(out, "compare_reports.html").exists()
+    assert _stamped(out, "keys_mismatch_matrix.csv").exists()
+    assert summary.filename_stamp == FIXED_RUN_DIR
 
 
 def test_run_parallel_keys_mismatch_matrix_carries_expected_rows(tmp_path: Path) -> None:
@@ -145,7 +148,7 @@ def test_run_parallel_keys_mismatch_matrix_carries_expected_rows(tmp_path: Path)
         workers=2,
         run_timestamp=FIXED_TS,
     )
-    matrix_path = out / stamped_filename("keys_mismatch_matrix.csv", FIXED_STAMP)
+    matrix_path = _stamped(out, "keys_mismatch_matrix.csv")
     lines = matrix_path.read_text(encoding="utf-8").splitlines()
     # Header + 3 mismatched keys (KEY...03 NM01, KEY...04 TR01 content, KEY...05 TR01 count).
     assert lines[0].startswith("key,")

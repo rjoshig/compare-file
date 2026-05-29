@@ -51,6 +51,9 @@ from segment_compare.parser import (
 from segment_compare.partitioner import equal_count_partition
 from segment_compare.worker import WorkerPayload, WorkerResult, run_worker
 from segment_compare.writer import (
+    MATCHES_FILE,
+    MATCHES_SAMPLE_SIZE,
+    RUN_DIR_FORMAT,
     STAMP_FORMAT,
     CompareReports,
     KeyMatrixEntry,
@@ -58,7 +61,6 @@ from segment_compare.writer import (
     SegmentSummary,
     Summary,
     build_key_matrix_entry,
-    stamped_filename,
     write_compare_reports_csv,
     write_compare_reports_html,
     write_keys_mismatch_matrix_csv,
@@ -160,8 +162,11 @@ def run(
             raise InputFileError(f"input file does not exist: {path}")
 
     start_time = datetime.now(timezone.utc)
-    filename_stamp = (run_timestamp or start_time).strftime(STAMP_FORMAT)
-    logger.info("starting comparison: %s vs %s (stamp=%s)", file_a, file_b, filename_stamp)
+    effective_ts = run_timestamp or start_time
+    filename_stamp = effective_ts.strftime(STAMP_FORMAT)
+    run_dir_name = effective_ts.strftime(RUN_DIR_FORMAT)
+    run_output_dir = output_dir / run_dir_name
+    logger.info("starting comparison: %s vs %s (run=%s)", file_a, file_b, run_dir_name)
 
     original_file_a, original_file_b = file_a, file_b
     rdw_a: RdwConfig | None = config.file_a_rdw
@@ -218,7 +223,9 @@ def run(
     per_segment_mismatch: dict[str, int] = defaultdict(int)
     key_matrix_entries: list[KeyMatrixEntry] = []
 
-    with OutputWriter(output_dir, segments_a_cfg, filename_stamp=filename_stamp) as writer:
+    # Per-run subdir (ADR-037): all 11 outputs land inside run_output_dir
+    # with bare filenames since the dir name already disambiguates runs.
+    with OutputWriter(run_output_dir, segments_a_cfg) as writer:
         _write_dups(file_a, dups_a, parser_a, segments_a_cfg, writer.write_dup_a)
         _write_dups(file_b, dups_b, parser_b, segments_b_cfg, writer.write_dup_b)
 
@@ -231,7 +238,10 @@ def run(
                 verdict = compare_records(rec_a, rec_b, normalizer, hasher)
 
                 if verdict.matched:
-                    writer.write_match(rec_a)
+                    # matches.dat carries only a sample (ADR-038); the
+                    # records_matched counter still reflects every match.
+                    if records_matched < MATCHES_SAMPLE_SIZE:
+                        writer.write_match(rec_a)
                     records_matched += 1
                 else:
                     writer.write_mismatch(verdict, rec_a, rec_b)
@@ -282,7 +292,7 @@ def run(
             config_paths={k: str(v) for k, v in config.paths.items()},
             config_audit_hash=config.audit_hash,
             engine_version=__version__,
-            filename_stamp=filename_stamp,
+            filename_stamp=run_dir_name,
         )
         writer.finalize(
             CompareReports(
@@ -291,7 +301,7 @@ def run(
                 layout_b=config.layout_b,
                 key_matrix_entries=tuple(key_matrix_entries),
                 matrix_segments=config.known_segments,
-                output_dir=output_dir,
+                output_dir=run_output_dir,
             )
         )
 
@@ -356,13 +366,16 @@ def run_parallel(
             raise InputFileError(f"input file does not exist: {path}")
 
     start_time = datetime.now(timezone.utc)
-    filename_stamp = (run_timestamp or start_time).strftime(STAMP_FORMAT)
+    effective_ts = run_timestamp or start_time
+    filename_stamp = effective_ts.strftime(STAMP_FORMAT)
+    run_dir_name = effective_ts.strftime(RUN_DIR_FORMAT)
+    run_output_dir = output_dir / run_dir_name
     logger.info(
-        "starting parallel comparison: %s vs %s (workers=%d, stamp=%s)",
+        "starting parallel comparison: %s vs %s (workers=%d, run=%s)",
         file_a,
         file_b,
         workers,
-        filename_stamp,
+        run_dir_name,
     )
 
     original_file_a, original_file_b = file_a, file_b
@@ -407,13 +420,17 @@ def run_parallel(
     only_b_keys = sorted(keys_b - keys_a)
     both_keys = sorted(keys_a & keys_b)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    workers_root = output_dir / "_workers"
+    # Per-run subdir (ADR-037): every output for this run lives under
+    # run_output_dir; the per-worker scratch dirs sit beside the merged
+    # files under that subdir so a single run remains a self-contained
+    # bundle on disk.
+    run_output_dir.mkdir(parents=True, exist_ok=True)
+    workers_root = run_output_dir / "_workers"
 
     # Master-owned outputs (orphans + dups). Written single-process via the
     # normal OutputWriter; matches/mismatches/report stay empty in the master
     # writer because those come from workers and are merged in afterwards.
-    with OutputWriter(output_dir, segments_a_cfg, filename_stamp=filename_stamp) as master_writer:
+    with OutputWriter(run_output_dir, segments_a_cfg) as master_writer:
         _write_dups(file_a, dups_a, parser_a, segments_a_cfg, master_writer.write_dup_a)
         _write_dups(file_b, dups_b, parser_b, segments_b_cfg, master_writer.write_dup_b)
         _write_key_only(
@@ -461,9 +478,15 @@ def run_parallel(
         with ProcessPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(run_worker, payloads))
 
-    # Merge per-worker outputs into the stamped run outputs.
+    # Merge per-worker outputs into the run-level bare-name outputs.
     worker_dirs = [workers_root / f"w{wid}" for wid in range(workers)]
-    merge_worker_outputs(worker_dirs, output_dir, filename_stamp)
+    merge_worker_outputs(worker_dirs, run_output_dir, "")
+    # Workers each emit every matched record into their slice; the master
+    # caps the merged matches.dat to MATCHES_SAMPLE_SIZE records so the
+    # parallel path matches the single-process behavior (ADR-038).
+    _truncate_matches_sample(
+        run_output_dir / MATCHES_FILE, MATCHES_SAMPLE_SIZE, segments_a_cfg.record_delimiter
+    )
 
     records_matched, records_mismatched, per_seg_match, per_seg_mismatch = fold_partial_summaries(
         results
@@ -500,7 +523,7 @@ def run_parallel(
         config_paths={k: str(v) for k, v in config.paths.items()},
         config_audit_hash=config.audit_hash,
         engine_version=__version__,
-        filename_stamp=filename_stamp,
+        filename_stamp=run_dir_name,
     )
 
     # Concatenate per-worker matrix entries in worker-id order so the
@@ -512,21 +535,15 @@ def run_parallel(
         layout_b=config.layout_b,
         key_matrix_entries=all_matrix_entries,
         matrix_segments=config.known_segments,
-        output_dir=output_dir,
+        output_dir=run_output_dir,
     )
 
-    # Write summary.json + the three human reports (ADR-035, ADR-036),
-    # all under the run output dir, all stamped.
-    write_summary(summary, output_dir / stamped_filename("summary.json", filename_stamp))
-    write_compare_reports_csv(
-        reports, output_dir / stamped_filename("compare_reports.csv", filename_stamp)
-    )
-    write_compare_reports_html(
-        reports, output_dir / stamped_filename("compare_reports.html", filename_stamp)
-    )
-    write_keys_mismatch_matrix_csv(
-        reports, output_dir / stamped_filename("keys_mismatch_matrix.csv", filename_stamp)
-    )
+    # Write summary.json + the three human reports (ADR-035, ADR-036,
+    # ADR-037), bare-named, all inside the per-run subdir.
+    write_summary(summary, run_output_dir / "summary.json")
+    write_compare_reports_csv(reports, run_output_dir / "compare_reports.csv")
+    write_compare_reports_html(reports, run_output_dir / "compare_reports.html")
+    write_keys_mismatch_matrix_csv(reports, run_output_dir / "keys_mismatch_matrix.csv")
 
     # Optional: clean up the per-worker scratch dir. Leave it for now so
     # debugging is easier; a future ADR can flip this once the path is
@@ -749,6 +766,41 @@ def _external_sort_inputs(
         strip_size=config.file_b_strip_size,
     )
     return sorted_a, sorted_b
+
+
+def _truncate_matches_sample(path: Path, sample_size: int, delimiter: bytes) -> None:
+    """Cap ``matches.dat`` at the first ``sample_size`` records (ADR-038).
+
+    The post-merge file is read once, scanned for record boundaries
+    (the configured per-record delimiter), and rewritten with at most
+    ``sample_size`` records. No-op when ``path`` doesn't exist or is
+    already at or below the cap.
+    """
+    if sample_size <= 0 or not path.exists():
+        return
+    if not delimiter:
+        # Records are back-to-back with no separator — the engine can't
+        # find boundaries without parsing. Skip the truncation in that
+        # mode; the operator can opt back in by setting a delimiter.
+        return
+    raw = path.read_bytes()
+    if not raw:
+        return
+    kept: list[bytes] = []
+    pos = 0
+    count = 0
+    while count < sample_size:
+        idx = raw.find(delimiter, pos)
+        if idx == -1:
+            # Last record without a trailing delimiter — keep it whole.
+            kept.append(raw[pos:])
+            count += 1
+            pos = len(raw)
+            break
+        kept.append(raw[pos : idx + len(delimiter)])
+        pos = idx + len(delimiter)
+        count += 1
+    path.write_bytes(b"".join(kept))
 
 
 def _build_per_segment_summary(

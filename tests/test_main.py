@@ -27,11 +27,10 @@ SAMPLE_B = EXAMPLES / "sample_b.dat"
 
 
 def _stamped_path(out_dir: Path, base: str) -> Path:
-    """Find the single timestamped output file in ``out_dir`` for ``base``."""
-    stem, _, ext = base.rpartition(".")
-    matches = sorted(out_dir.glob(f"{stem}_*.{ext}"))
-    assert len(matches) == 1, f"expected 1 file for {base}, found: {matches}"
-    return matches[0]
+    """Find a bare-named output file inside the single per-run subdir (ADR-037)."""
+    subdirs = [p for p in out_dir.iterdir() if p.is_dir() and p.name.startswith("report-")]
+    assert len(subdirs) == 1, f"expected 1 run subdir under {out_dir}, found: {subdirs}"
+    return subdirs[0] / base
 
 
 def _common_args(output_dir: Path) -> list[str]:
@@ -70,10 +69,8 @@ def test_main_against_samples_produces_all_outputs_and_returns_mismatches(
     ):
         path = _stamped_path(out, name)
         assert path.exists(), f"missing output: {name}"
-        # YYYYMMDDHHMM = 12 digits between stem and extension
-        stem = path.stem
-        stamp = stem.rsplit("_", 1)[-1]
-        assert len(stamp) == 12 and stamp.isdigit(), f"bad stamp in {path.name}"
+        # Per-run subdir is the disambiguator now (ADR-037); files are bare.
+        assert path.parent.name.startswith("report-"), f"bad run-dir for {path.name}"
 
     summary = json.loads(_stamped_path(out, "summary.json").read_text())
     # Per examples/README.md
