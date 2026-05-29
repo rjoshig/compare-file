@@ -48,6 +48,36 @@
       ]
     },
     {
+      "name": "AD01",
+      "size": 59,
+      "$comment": "Address segment (street/city/state/zip = 52 data bytes). AD01 before EM01 is a postal address (compared as AD01); AD01 after EM01 is renamed to EMAD (ADR-034). Same size as EMAD.",
+      "fields": [
+        { "name": "street", "length": 30                                      },
+        { "name": "city",   "length": 15                                      },
+        { "name": "state",  "length": 2                                       },
+        { "name": "zip5",   "length": 5                                       }
+      ]
+    },
+    {
+      "name": "EM01",
+      "size": 47,
+      "$comment": "Email segment; its presence triggers the AD01→EMAD rename for subsequent AD01s in the record.",
+      "fields": [
+        { "name": "email_addr", "length": 40                                  }
+      ]
+    },
+    {
+      "name": "EMAD",
+      "size": 59,
+      "$comment": "Logical-only address bucket for AD01-after-EM01; never on the wire. Same size and field names as AD01.",
+      "fields": [
+        { "name": "street", "length": 30                                      },
+        { "name": "city",   "length": 15                                      },
+        { "name": "state",  "length": 2                                       },
+        { "name": "zip5",   "length": 5                                       }
+      ]
+    },
+    {
       "name": "TR01",
       "size": 50,
       "$comment": "TR01 may appear 1..N times per record.",
@@ -82,6 +112,15 @@
       "fields": [
         { "name": "segment_count", "length": 3,  "exclude": true              }
       ]
+    }
+  ],
+
+  "segment_aliases": [
+    {
+      "$comment": "AD01 after EM01 → EMAD (ADR-034). One rule per wire_name; wire/logical must be declared with equal size.",
+      "wire_name":     "AD01",
+      "logical_name":  "EMAD",
+      "after_segment": "EM01"
     }
   ]
 }

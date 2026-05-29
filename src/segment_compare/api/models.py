@@ -27,12 +27,29 @@ class TemplateField(BaseModel):
 
 
 class TemplateSegment(BaseModel):
-    """One segment row in the template; fields stay read-only on name/length."""
+    """One segment row in the template; fields stay read-only on name/length.
+
+    When this segment is the ``logical_name`` target of a segment alias
+    (e.g. ``EMAD`` mirroring ``AD01`` after ``EM01``), ``alias_of`` and
+    ``alias_after`` carry the wire/trigger segment names so the UI can
+    render the "EMAD (AD01 segment) · after EM01" note. Both are ``None``
+    for ordinary segments.
+    """
 
     name: str
     size: int
     role: str | None = None  # "key" | "end" | None
     fields: list[TemplateField]
+    alias_of: str | None = None  # wire segment this one mirrors (e.g. "AD01")
+    alias_after: str | None = None  # trigger segment (e.g. "EM01")
+
+
+class TemplateSegmentAlias(BaseModel):
+    """One context-sensitive rename rule (ADR-034) as the UI sees it."""
+
+    wire_name: str  # segment on the wire, e.g. "AD01"
+    logical_name: str  # comparison bucket once triggered, e.g. "EMAD"
+    after_segment: str  # trigger segment, e.g. "EM01"
 
 
 class TemplateLayout(BaseModel):
@@ -44,6 +61,7 @@ class TemplateLayout(BaseModel):
     rdw: dict[str, object] | None
     sort: dict[str, object]
     segments: list[TemplateSegment]
+    segment_aliases: list[TemplateSegmentAlias] = Field(default_factory=list)
 
 
 class TemplateBundle(BaseModel):
@@ -77,6 +95,19 @@ class SortBlock(BaseModel):
     key_type: Literal["alphanumeric", "numeric", "string", "number"] = "alphanumeric"
 
 
+class AliasSegmentDecl(BaseModel):
+    """An operator-declared alias segment (ADR-034 / ADR-039).
+
+    The operator places ``logical_name`` (e.g. ``EMAD``) in the segment
+    list; it mirrors ``wire_name``'s layout and is applied to every
+    ``wire_name`` instance appearing after ``after_segment`` in a record.
+    """
+
+    logical_name: str  # e.g. "EMAD"
+    wire_name: str  # segment whose layout it reuses, e.g. "AD01"
+    after_segment: str  # trigger segment, e.g. "EM01"
+
+
 class FileSideConfig(BaseModel):
     """The UI state for one side (File A or File B)."""
 
@@ -92,6 +123,8 @@ class FileSideConfig(BaseModel):
     # The TU4R field marked as the compare key (must exist as either a
     # template field or a user-added field in TU4R).
     key_field_name: str
+    # Operator-declared alias segments beyond any baked into the template.
+    alias_segments: list[AliasSegmentDecl] = Field(default_factory=list)
 
 
 class SaveConfigRequest(BaseModel):

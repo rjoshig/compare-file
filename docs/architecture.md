@@ -54,7 +54,7 @@
 | `pipeline.py` | Orchestrates: index-build → dup filter → inner-join iteration → compare → write. Single function `run(file_a, file_b, config, output_dir)`. |
 | `config.py` | Loads and validates the three JSON config files. Computes a SHA-256 of the merged config for the run audit trail. |
 | `__main__.py` | CLI (argparse), wraps `pipeline.run`. |
-| `api/` | Phase 3 FastAPI app, wraps `pipeline.run`. |
+| `api/` | Phase 3 FastAPI app, wraps `pipeline.run`. `api/storage.py` projects the UI's per-side config (template overrides, appended fields, **segment aliases**) into the engine's on-disk layout schema — including emitting the `segment_aliases` block and cloning a wire segment's fields into its logical alias segment (ADR-034 / ADR-039). |
 | `service.py` | Phase 4 directory-watcher entry point, wraps `pipeline.run`. |
 
 ## Data flow per comparison

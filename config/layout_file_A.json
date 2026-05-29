@@ -48,6 +48,36 @@
       ]
     },
     {
+      "name": "AD01",
+      "size": 59,
+      "$comment": "Address segment (street/city/state/zip = 52 data bytes). An AD01 BEFORE any EM01 in the record is a postal address, compared under the name AD01. An AD01 AFTER an EM01 is renamed to EMAD by the segment_aliases rule below (ADR-034). AD01 and EMAD must declare the same size (59) — the rename only changes the comparison bucket, not the bytes.",
+      "fields": [
+        { "name": "street", "length": 30                                      },
+        { "name": "city",   "length": 15                                      },
+        { "name": "state",  "length": 2                                       },
+        { "name": "zip5",   "length": 5                                       }
+      ]
+    },
+    {
+      "name": "EM01",
+      "size": 47,
+      "$comment": "Email segment. Its presence is the trigger: once an EM01 has been seen in a record, subsequent AD01 segments in that same record are treated as EMAD.",
+      "fields": [
+        { "name": "email_addr", "length": 40                                  }
+      ]
+    },
+    {
+      "name": "EMAD",
+      "size": 59,
+      "$comment": "Logical-only address bucket for AD01-after-EM01. EMAD never appears on the wire; it exists so the engine has a declared same-sized segment (field names matching AD01) to rename post-EM01 AD01 instances into.",
+      "fields": [
+        { "name": "street", "length": 30                                      },
+        { "name": "city",   "length": 15                                      },
+        { "name": "state",  "length": 2                                       },
+        { "name": "zip5",   "length": 5                                       }
+      ]
+    },
+    {
       "name": "TR01",
       "size": 50,
       "$comment": "TR01 may appear 1..N times per record. Multiset comparison handles count + ordering automatically.",
@@ -82,6 +112,15 @@
       "fields": [
         { "name": "segment_count", "length": 3,  "exclude": true              }
       ]
+    }
+  ],
+
+  "segment_aliases": [
+    {
+      "$comment": "Every AD01 that appears AFTER an EM01 in the same record becomes EMAD for comparison and reporting (ADR-034). wire_name and logical_name must both be declared in segments[] and share the same size; after_segment must also be declared. At most one alias per wire_name.",
+      "wire_name":     "AD01",
+      "logical_name":  "EMAD",
+      "after_segment": "EM01"
     }
   ]
 }

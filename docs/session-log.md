@@ -9,6 +9,111 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-29 (ADR-039 — segment aliases in the Web UI + demo fixture)
+
+**Branch:** `dev`
+**Phase:** 3 (web UI) — also touches the engine demo fixture (Phase 2 surface)
+**Status:** Shipped end-to-end. Operator can declare an `AD01`-after-`EM01`
+→ `EMAD` alias from the browser; the committed demo fixture exercises it via
+CLI + UI. 225 tests pass on the `.venv` interpreter; black / flake8 / mypy
+clean; `ui/` builds.
+
+### Why this session
+
+ADR-034 shipped the engine's `segment_aliases` capability last session, but
+only the CLI / hand-authored layouts could use it. The user asked to expose it
+in the Web UI: place an `EMAD` segment after `EM01` that reuses `AD01`'s layout,
+shown as "EMAD (AD01 segment)", with the engine treating `AD01`-after-`EM01`
+as `EMAD`. Two product calls taken up front: (1) operator *declares* the alias
+segment in the UI (not just views a baked one); (2) `AD01`/`EM01`/`EMAD` go
+into the **main committed fixture** so it's demoable from the browser + CLI.
+
+### What was completed (ADR-039)
+
+- **Sample layout (standalone):** `config/layout_example_segment_alias.json`
+  — fully-commented AD01/EM01/EMAD + alias rule (verified it loads via
+  `load_file_layout`). Honors the "every config feature needs a sample layout"
+  rule.
+- **Committed config:** `config/layout_file_A.json` + `layout_file_B.json`
+  now declare `AD01` (street/city/state/zip5 = 59 bytes), `EM01` (47), `EMAD`
+  (59, mirror) + the `AD01→EMAD after EM01` rule.
+- **Fixture:** `examples/sample_*.dat` carry, after each record's `NM01`, an
+  `AD01`(postal) + `EM01` + `AD01`(email) trio. The trailing `AD01` buckets as
+  `EMAD`. Inserted bytes are **identical on both sides**, so every aggregate
+  count is unchanged (matched=4 / mismatched=3 / only 1,2 / dups 2,2). Rebuilt
+  with the idempotent `scripts/inject_alias_segments.py`. Record sizes
+  417→582, 467→632; file sizes 5880 / 6413 bytes.
+- **API wire schema (`api/models.py`):** `TemplateSegment.alias_of/alias_after`;
+  new `TemplateSegmentAlias` on `TemplateLayout.segment_aliases`; new
+  `AliasSegmentDecl` on `FileSideConfig.alias_segments`.
+- **Projection (`api/storage.py`):** `_load_one_template` surfaces aliases +
+  tags logical-target segments. `_build_engine_layout` clones the **wire**
+  segment's resolved fields into the logical segment (guarantees the equal-size
+  invariant), emits a top-level `segment_aliases`, dedupes by `wire_name`
+  (template rule wins). New `_resolve_fields(..., key_only=)` helper.
+- **UI (`ui/src/`):** `SegmentEditor.vue` renders the "EMAD (AD01 segment) ·
+  after EM01" note + an `alias` tag, read-only field mirror, remove button for
+  operator-added aliases. New `AliasSegmentEditor.vue` (Add-alias form: logical
+  name + mirrors-segment Select + applied-after Select, with one-rule-per-wire
+  guarding). `FileBody.vue` gains a "Segment aliases" panel; `FieldConfig.vue`
+  seeds `alias_segments: []`. **Per user request the "Segment aliases"
+  authoring panel is commented out in `FileBody.vue` for now** (import +
+  template block) — template-baked aliases like `EMAD` still render as
+  read-only cards in the Segments panel via `SegmentEditor`'s alias note.
+  Re-enable by uncommenting both spots; `AliasSegmentEditor.vue` and the
+  backend `alias_segments` path are kept intact.
+- **Tests:** oracle test asserts the new `AD01` + `EMAD` per-segment buckets
+  (counts unchanged); `test_load_committed_layout_file_a/b` updated for the new
+  segments + alias rule; new `tests/test_api_storage.py` (6 cases) covers both
+  projection paths + dedupe + unknown-wire rejection, each round-tripped
+  through `load_file_layout`.
+- **Docs:** ADR-039 in `docs/decisions.md`; `examples/README.md` record-layout
+  table + sizes + aliasing note; `docs/architecture.md` api/storage row.
+
+### Gotcha resolved
+
+`tests/synthetic_data.py` already emitted an `AD01` (street/city/state/zip =
+52 data, 59 total). Declaring `AD01` in the committed config turned on
+FieldNormalizer length validation, so `AD01`/`EMAD` were aligned to that exact
+59-byte layout (was briefly 77). `EM01`/`EMAD` are absent from synthetic data,
+so the alias simply never fires there.
+
+### What's pending
+
+- Unchanged Phase 3 backlog from the prior entry: API route tests
+  (`tests/test_api_*` for routes), Run History view, saved-config picker UI.
+- The UI alias panel has no automated front-end test (no FE test harness in the
+  repo yet); verified via `npm run build` + the storage round-trip only.
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-039**: segment aliases in the Web UI (operator-declared via
+  `FileSideConfig.alias_segments` + template-baked metadata) and the
+  AD01/EM01/EMAD demo-fixture extension (identical-content insertion preserves
+  all counts). Extends ADR-034 / ADR-033.
+
+### Next concrete action
+
+Resume the prior Phase 3 backlog: write `tests/test_api_routes.py`
+(`/api/template-layouts` now includes `segment_aliases`; `/api/configs`
+round-trip persists `alias_segments`), then the Run History view.
+
+### Notes for future me
+
+- `scripts/inject_alias_segments.py` is idempotent (skips if `AD01` already
+  present) — safe to re-run after a `git checkout` of the samples.
+- Engine emits `record.raw`, so `matches.dat`/`mismatches.dat` still carry the
+  on-wire `AD01`; only `summary.json::per_segment` + `report.csv` show `EMAD`.
+- The projection clones the **wire** segment's fields for the logical segment;
+  editing `AD01`'s excludes in the UI flows to `EMAD` automatically (EMAD's
+  field table is read-only by design).
+
+---
+
 ## Session: 2026-05-29 (Phase 3 kickoff — FastAPI backend + Vue dashboard + report polish)
 
 **Branch:** `dev`

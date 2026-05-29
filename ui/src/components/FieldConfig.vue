@@ -40,6 +40,7 @@ function makeEmptySide() {
     exclude_overrides: {},
     added_fields: {},
     key_field_name: '',
+    alias_segments: [],
   }
 }
 

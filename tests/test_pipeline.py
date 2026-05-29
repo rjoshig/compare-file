@@ -55,6 +55,10 @@ def test_run_against_sample_files_matches_oracle(tmp_path: Path) -> None:
       - 2 dups in A (both KEY...08)
       - 2 dups in B (both KEY...09)
       - 3 report.csv rows (NM01, TR01 content, TR01 count)
+
+    The fixture also carries AD01 (postal, before EM01) + an AD01-after-EM01
+    instance that buckets as EMAD (ADR-034/ADR-039). The inserted segments
+    are identical on both sides, so the counts above are unaffected.
     """
     config = load_config(CONFIG_DIR)
     out = tmp_path / "results"
@@ -114,6 +118,16 @@ def test_run_against_sample_files_matches_oracle(tmp_path: Path) -> None:
     assert summary_data["records_mismatched"] == 3
     assert summary_data["config_audit_hash"] == config.audit_hash
     assert summary_data["filename_stamp"] == FIXED_RUN_DIR
+
+    # ADR-034/ADR-039: AD01-after-EM01 buckets as EMAD, distinct from the
+    # postal AD01 before EM01. Each record has one of each, so AD01 and EMAD
+    # both total 10 in A / 11 in B; identical content => no mismatches.
+    by_seg = {s.segment_name: s for s in summary.per_segment}
+    assert "AD01" in by_seg and "EMAD" in by_seg
+    assert (by_seg["AD01"].total_in_a, by_seg["AD01"].total_in_b) == (10, 11)
+    assert (by_seg["EMAD"].total_in_a, by_seg["EMAD"].total_in_b) == (10, 11)
+    assert by_seg["AD01"].mismatch_count == 0
+    assert by_seg["EMAD"].mismatch_count == 0
 
 
 # ---------------------------------------------------------------------------

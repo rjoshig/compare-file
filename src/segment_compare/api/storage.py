@@ -42,6 +42,7 @@ from segment_compare.api.models import (
     TemplateField,
     TemplateLayout,
     TemplateSegment,
+    TemplateSegmentAlias,
 )
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,18 @@ def _load_one_template(label: Literal["A", "B"], path: Path) -> TemplateLayout:
         raise StorageError(f"Template layout missing on disk: {path}")
     raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
 
+    aliases = [
+        TemplateSegmentAlias(
+            wire_name=a["wire_name"],
+            logical_name=a["logical_name"],
+            after_segment=a["after_segment"],
+        )
+        for a in raw.get("segment_aliases", [])
+    ]
+    # Map each logical-target segment to its (wire, trigger) so the UI can
+    # render the "EMAD (AD01 segment) · after EM01" note.
+    alias_by_logical = {a.logical_name: a for a in aliases}
+
     def _build_segment(seg_raw: dict[str, Any]) -> TemplateSegment:
         fields = [
             TemplateField(
@@ -115,11 +128,14 @@ def _load_one_template(label: Literal["A", "B"], path: Path) -> TemplateLayout:
             )
             for f in seg_raw["fields"]
         ]
+        alias = alias_by_logical.get(seg_raw["name"])
         return TemplateSegment(
             name=seg_raw["name"],
             size=int(seg_raw["size"]),
             role=seg_raw.get("role"),
             fields=fields,
+            alias_of=alias.wire_name if alias else None,
+            alias_after=alias.after_segment if alias else None,
         )
 
     return TemplateLayout(
@@ -129,6 +145,7 @@ def _load_one_template(label: Literal["A", "B"], path: Path) -> TemplateLayout:
         rdw=raw.get("rdw"),
         sort=raw["sort"],
         segments=[_build_segment(s) for s in raw["segments"]],
+        segment_aliases=aliases,
     )
 
 
@@ -212,46 +229,101 @@ def config_dir_for(name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_fields(
+    seg: TemplateSegment, side: FileSideConfig, *, key_only: bool = False
+) -> list[dict[str, Any]]:
+    """Resolve one segment's fields: template fields + overrides + added fields.
+
+    ``key_only`` drops the per-field ``key`` flag — used when cloning a wire
+    segment's layout into a logical alias segment, which must never carry the
+    record key.
+    """
+    fields_out: list[dict[str, Any]] = []
+    for fld in seg.fields:
+        override_key = f"{seg.name}.{fld.name}"
+        exclude = side.exclude_overrides.get(override_key, fld.exclude)
+        entry: dict[str, Any] = {"name": fld.name, "length": fld.length}
+        if exclude:
+            entry["exclude"] = True
+        if fld.key and not key_only:
+            entry["key"] = True
+        fields_out.append(entry)
+
+    for added in side.added_fields.get(seg.name, []):
+        entry = {"name": added.name, "length": added.length}
+        if added.exclude:
+            entry["exclude"] = True
+        if added.key and not key_only:
+            entry["key"] = True
+        fields_out.append(entry)
+    return fields_out
+
+
 def _build_engine_layout(side: FileSideConfig, template: TemplateLayout) -> dict[str, Any]:
     """Build an engine-shape layout JSON from the UI's per-side config."""
     header_bytes = cast(int, template.file_format["segment_name_bytes"]) + cast(
         int, template.file_format["size_field_bytes"]
     )
+    tpl_by_name = {seg.name: seg for seg in template.segments}
+
+    # Effective alias rules: template-baked ∪ operator-declared, one per wire
+    # (the engine validator rejects more than one rule per wire_name).
+    aliases: list[dict[str, str]] = [
+        {"wire_name": a.wire_name, "logical_name": a.logical_name, "after_segment": a.after_segment}
+        for a in template.segment_aliases
+    ]
+    seen_wire = {a["wire_name"] for a in aliases}
+    for decl in side.alias_segments:
+        if decl.wire_name in seen_wire:
+            continue  # one rule per wire_name; template rule wins
+        aliases.append(
+            {
+                "wire_name": decl.wire_name,
+                "logical_name": decl.logical_name,
+                "after_segment": decl.after_segment,
+            }
+        )
+        seen_wire.add(decl.wire_name)
+    # logical segment name -> wire segment it mirrors.
+    logical_to_wire = {a["logical_name"]: a["wire_name"] for a in aliases}
+
+    def _segment_entry(name: str, role: str | None, fields: list[dict[str, Any]]) -> dict[str, Any]:
+        size = header_bytes + sum(int(f["length"]) for f in fields)
+        entry: dict[str, Any] = {"name": name, "size": size, "fields": fields}
+        if role:
+            entry["role"] = role
+        return entry
 
     segments_out: list[dict[str, Any]] = []
     for seg in template.segments:
-        # Start with template fields, applying any per-config exclude override.
-        fields_out: list[dict[str, Any]] = []
-        for fld in seg.fields:
-            override_key = f"{seg.name}.{fld.name}"
-            exclude = side.exclude_overrides.get(override_key, fld.exclude)
-            entry: dict[str, Any] = {"name": fld.name, "length": fld.length}
-            if exclude:
-                entry["exclude"] = True
-            if fld.key:
-                entry["key"] = True
-            fields_out.append(entry)
+        if seg.name in logical_to_wire:
+            # Alias-target segment: mirror the wire segment's resolved layout so
+            # the two sizes always agree (the rename reuses the same bytes).
+            wire = tpl_by_name[logical_to_wire[seg.name]]
+            fields_out = _resolve_fields(wire, side, key_only=True)
+        else:
+            fields_out = _resolve_fields(seg, side)
+        segments_out.append(_segment_entry(seg.name, seg.role, fields_out))
 
-        # Append user-added fields for this segment, if any.
-        for added in side.added_fields.get(seg.name, []):
-            entry = {"name": added.name, "length": added.length}
-            if added.exclude:
-                entry["exclude"] = True
-            if added.key:
-                entry["key"] = True
-            fields_out.append(entry)
-
-        size = header_bytes + sum(int(f["length"]) for f in fields_out)
-        seg_entry: dict[str, Any] = {"name": seg.name, "size": size, "fields": fields_out}
-        if seg.role:
-            seg_entry["role"] = seg.role
-        segments_out.append(seg_entry)
+    # Operator-declared alias segments whose logical name isn't already a
+    # template segment: synthesize one by cloning the wire segment's layout.
+    for decl in side.alias_segments:
+        if decl.logical_name in tpl_by_name:
+            continue
+        wire_seg = tpl_by_name.get(decl.wire_name)
+        if wire_seg is None:
+            raise StorageError(
+                f"Alias segment {decl.logical_name!r} mirrors unknown wire segment "
+                f"{decl.wire_name!r}; must match a template segment."
+            )
+        fields_out = _resolve_fields(wire_seg, side, key_only=True)
+        segments_out.append(_segment_entry(decl.logical_name, None, fields_out))
 
     # Promote the chosen key field on TU4R: clear key=true everywhere, then
     # mark the requested one.
     _apply_key_choice(segments_out, side.key_field_name)
 
-    return {
+    layout: dict[str, Any] = {
         "file_format": dict(template.file_format),
         "strip_leading_bytes": (
             {
@@ -277,6 +349,9 @@ def _build_engine_layout(side: FileSideConfig, template: TemplateLayout) -> dict
         },
         "segments": segments_out,
     }
+    if aliases:
+        layout["segment_aliases"] = aliases
+    return layout
 
 
 def _normalize_key_type(value: str) -> str:

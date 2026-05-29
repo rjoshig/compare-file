@@ -1574,3 +1574,60 @@ lands before any engine churn:
 - A future "validate cardinality" feature (e.g., enforce that every
   record has exactly one NM01) would slot in as a per-segment
   optional `cardinality` field, not by re-introducing `repeats`.
+
+---
+
+## ADR-039 — Segment aliases in the Web UI + demo fixture
+
+**Status:** accepted; extends ADR-034 (engine) and ADR-033 (per-file layout)
+
+**Context:** ADR-034 shipped the engine capability (`segment_aliases`
+on a layout file) but only the CLI / hand-written layouts could use it.
+The Phase 3 Web UI — the API wire schema (`api/models.py`), the
+UI→engine projection (`api/storage.py::_build_engine_layout`), and the
+Vue segment editor — ignored `segment_aliases` entirely. Operators had
+no way to declare "treat AD01-after-EM01 as EMAD" from the browser, and
+the committed demo fixture (`examples/sample_*.dat`) contained no
+`AD01`/`EM01` segments to exercise it.
+
+**Decision:**
+
+1. **UI surface.** The operator declares an alias segment in the segment
+   list: a logical name (e.g. `EMAD`), the wire segment whose layout it
+   mirrors (e.g. `AD01`), and the trigger it follows (e.g. `EM01`). It
+   renders as a read-only mirror card labelled "EMAD (AD01 segment) ·
+   after EM01". Aliases also baked into a template layout render the same
+   way (the template carries `alias_of`/`alias_after` metadata per
+   logical segment).
+   - `FileSideConfig.alias_segments: list[AliasSegmentDecl]` carries
+     operator-declared rules; `TemplateLayout.segment_aliases` +
+     `TemplateSegment.alias_of/alias_after` carry template-baked ones.
+   - The projection clones the **wire** segment's resolved fields into
+     the logical segment (guaranteeing the equal-size invariant the
+     engine validator enforces) and emits a top-level `segment_aliases`
+     array. Rules are deduped by `wire_name` (one rule per wire); a
+     template rule wins over an operator rule for the same wire.
+
+2. **Demo fixture.** `config/layout_file_*.json` now declare `AD01`,
+   `EM01`, `EMAD` + the `AD01→EMAD after EM01` rule, and
+   `examples/sample_*.dat` carry, after each record's `NM01`, an
+   `AD01` (postal) + `EM01` + `AD01` (email) trio. The trailing `AD01`
+   buckets as `EMAD`. The inserted bytes are **identical on both sides**,
+   so every aggregate count (matched / mismatched / orphan / dup) is
+   unchanged — only `summary.json::per_segment` gains `AD01` / `EM01` /
+   `EMAD` entries. The fixture was rebuilt with
+   `scripts/inject_alias_segments.py` (idempotent), not by hand.
+
+**Consequences:**
+
+- `AD01`'s field layout (`street`/`city`/`state`/`zip5` = 52 data, 59
+  total) is aligned with the pre-existing `AD01` in
+  `tests/synthetic_data.py`, so the 3M/50K benchmark generator validates
+  cleanly against the committed config now that `AD01` is declared.
+- Output `.dat` files still carry the on-wire `AD01` (the engine emits
+  `record.raw`); only `summary.json::per_segment` and `report.csv` show
+  `EMAD`. Unchanged from ADR-034.
+- The UI prevents declaring two aliases for one wire (the engine
+  validator rejects it); the projection enforces the same dedupe.
+- A standalone, fully-commented example layout lives at
+  `config/layout_example_segment_alias.json`.

@@ -92,6 +92,9 @@ def test_load_committed_layout_file_a() -> None:
         "TU4R",
         "SH01",
         "NM01",
+        "AD01",
+        "EM01",
+        "EMAD",
         "TR01",
         "SC01",
         "CL01",
@@ -102,12 +105,19 @@ def test_load_committed_layout_file_a() -> None:
     assert layout.key_field.name == "account_nbr"
     # key sits after the 4-byte "DATA" prefix, runs 12 bytes
     assert layout.key_range == (4, 16)
+    # ADR-034: AD01-after-EM01 is renamed to EMAD for comparison.
+    assert [(a.wire_name, a.logical_name, a.after_segment) for a in layout.segment_aliases] == [
+        ("AD01", "EMAD", "EM01")
+    ]
 
 
 def test_load_committed_layout_file_b() -> None:
     layout = load_file_layout(CONFIG_DIR / "layout_file_B.json")
     assert layout.key_segment.name == "TU4R"
     assert layout.key_range == (4, 16)
+    assert [(a.wire_name, a.logical_name, a.after_segment) for a in layout.segment_aliases] == [
+        ("AD01", "EMAD", "EM01")
+    ]
 
 
 def test_minimal_layout_loads(tmp_path: Path) -> None:

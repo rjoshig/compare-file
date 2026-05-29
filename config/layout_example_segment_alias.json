@@ -1,0 +1,88 @@
+{
+  "$comment": "Example layout demonstrating context-sensitive segment aliasing (ADR-034). PROBLEM: in this feed an AD01 segment that appears BEFORE an EM01 is an ordinary postal address, but an AD01 that appears AFTER an EM01 is an email-related address. They share the same on-wire name (AD01) and the same byte layout, so the multiset comparator would lump them into one bucket — a postal-address difference could then mask an email-address difference, or vice versa. The on-wire bytes are fixed by the upstream system; we cannot rename AD01 at the source. SOLUTION: declare both AD01 and a same-sized EMAD segment, then add a segment_aliases rule. At parse time the engine scans each record's segments in order; once EM01 has appeared, every subsequent AD01 in that record is renamed to EMAD in memory (the bytes on disk are untouched). The trigger is per-record and once-armed-stays-armed: it resets at each record boundary, and a record that has AD01 but no EM01 keeps AD01. Drop this in as a layout_file_A.json / layout_file_B.json variant. See docs/decisions.md ADR-034 and the round-trip tests in tests/test_layout.py / tests/test_pipeline.py.",
+
+  "file_format": {
+    "segment_name_bytes":   4,
+    "size_field_bytes":     3,
+    "size_encoding":        "ascii_int",
+    "size_includes_header": true,
+    "data_encoding":        "ascii",
+    "record_delimiter":     "\n"
+  },
+
+  "strip_leading_bytes": null,
+  "rdw":                 null,
+
+  "sort": {
+    "input_sorted": true,
+    "order":        "ascending",
+    "key_type":     "alphanumeric"
+  },
+
+  "segments": [
+    {
+      "name": "TU4R",
+      "role": "key",
+      "size": 30,
+      "fields": [
+        { "name": "data_prefix",   "length": 4,  "exclude": true              },
+        { "name": "account_nbr",   "length": 12, "key":     true              },
+        { "name": "source_branch", "length": 7                                }
+      ]
+    },
+    {
+      "name": "NM01",
+      "size": 57,
+      "fields": [
+        { "name": "first_name",  "length": 20                                 },
+        { "name": "middle_name", "length": 15                                 },
+        { "name": "last_name",   "length": 15                                 }
+      ]
+    },
+    {
+      "name": "AD01",
+      "size": 77,
+      "$comment": "Address segment. An AD01 BEFORE any EM01 in the record is a postal address and is compared under the name AD01. An AD01 AFTER an EM01 is renamed to EMAD by the segment_aliases rule below. AD01 and EMAD MUST declare the same size (77) — the rename only changes the comparison bucket, not the bytes.",
+      "fields": [
+        { "name": "addr_line1",  "length": 30                                 },
+        { "name": "addr_line2",  "length": 30                                 },
+        { "name": "postal_code", "length": 10                                 }
+      ]
+    },
+    {
+      "name": "EM01",
+      "size": 47,
+      "$comment": "Email segment. Its presence is the trigger: once an EM01 has been seen in a record, subsequent AD01 segments in that same record are treated as EMAD.",
+      "fields": [
+        { "name": "email_addr", "length": 40                                  }
+      ]
+    },
+    {
+      "name": "EMAD",
+      "size": 77,
+      "$comment": "Logical-only address bucket for AD01-after-EM01. EMAD never appears on the wire — no record on disk contains the literal name EMAD. It exists in the layout solely so the engine has a declared segment (with a matching 77-byte size and identical field names) to rename post-EM01 AD01 instances into. Field names must match AD01's so the per-field comparison lines up.",
+      "fields": [
+        { "name": "addr_line1",  "length": 30                                 },
+        { "name": "addr_line2",  "length": 30                                 },
+        { "name": "postal_code", "length": 10                                 }
+      ]
+    },
+    {
+      "name": "ENDS",
+      "role": "end",
+      "size": 10,
+      "fields": [
+        { "name": "segment_count", "length": 3,  "exclude": true              }
+      ]
+    }
+  ],
+
+  "segment_aliases": [
+    {
+      "$comment": "Rename rule: every AD01 that appears AFTER an EM01 in the same record becomes EMAD for comparison and reporting. wire_name and logical_name must both be declared in segments[] above and must share the same size; after_segment must also be declared. At most one alias is allowed per wire_name.",
+      "wire_name":     "AD01",
+      "logical_name":  "EMAD",
+      "after_segment": "EM01"
+    }
+  ]
+}

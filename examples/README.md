@@ -22,16 +22,33 @@ ASCII 3-digit decimal in the segment header.
 | 1 | `TU4R` | 030 | `DATA` (4) + 12-byte key + 7-byte source/branch tag |
 | 2 | `SH01` | 035 | `01NYY020305` status block + 17 spaces padding |
 | 3 | `NM01` | 057 | first name (20) + middle name (15) + last name (15) — space-padded |
-| 4 | `TR01` | 050 | `Annnnnnn  ABCBANK ssss bbbb` 27-byte structured prefix + 10-byte TXNREF + 6 spaces |
-| 5 | `TR01` | 050 | (repeating — typical record has 3; may differ between A and B) |
-| 6 | `TR01` | 050 | |
-| 7 | `SC01` | 034 | `+nnnnnnnnn` 10-byte code + 17 spaces padding |
-| 8 | `SC01` | 034 | (repeating) |
-| 9 | `CL01` | 067 | `PUBL  ABC. ` (11) + 8-byte timestamp (`YYYYMMDD`) + ` I` (2) + 39 spaces |
-| 10 | `ENDS` | 010 | 3-byte ASCII segment count (informational only — excluded from comparison) |
+| 4 | `AD01` | 059 | street (30) + city (15) + state (2) + zip5 (5) — **postal** address (before `EM01`) |
+| 5 | `EM01` | 047 | email address (40) — alias trigger |
+| 6 | `AD01` | 059 | street/city/state/zip — **email** address (after `EM01`; buckets as `EMAD`, ADR-034) |
+| 7 | `TR01` | 050 | `Annnnnnn  ABCBANK ssss bbbb` 27-byte structured prefix + 10-byte TXNREF + 6 spaces |
+| 8 | `TR01` | 050 | (repeating — typical record has 3; may differ between A and B) |
+| 9 | `TR01` | 050 | |
+| 10 | `SC01` | 034 | `+nnnnnnnnn` 10-byte code + 17 spaces padding |
+| 11 | `SC01` | 034 | (repeating) |
+| 12 | `CL01` | 067 | `PUBL  ABC. ` (11) + 8-byte timestamp (`YYYYMMDD`) + ` I` (2) + 39 spaces |
+| 13 | `ENDS` | 010 | 3-byte ASCII segment count (informational only — excluded from comparison) |
 
-Standard record (3 TR01s) = **417 bytes** + `\n` = 418 on the wire.
-Record with 4 TR01s = **467 bytes** + `\n` = 468 on the wire.
+Standard record (3 TR01s) = **582 bytes** + `\n` = 583 on the wire.
+Record with 4 TR01s = **632 bytes** + `\n` = 633 on the wire.
+
+### Segment aliasing (ADR-034)
+
+The committed layouts declare a `segment_aliases` rule:
+`AD01` → `EMAD` after `EM01`. The first `AD01` (postal, before `EM01`)
+is compared under `AD01`; the second `AD01` (after `EM01`) is renamed in
+memory to `EMAD` so postal-address and email-address differences land in
+separate buckets. The on-wire bytes are untouched — `matches.dat` /
+`mismatches.dat` still show `AD01`; only `summary.json::per_segment` and
+`report.csv` use `EMAD`. The inserted `AD01`/`EM01`/`AD01` content is
+identical on both sides, so it doesn't change any match/mismatch count.
+A fully-commented standalone example is in
+`config/layout_example_segment_alias.json`; the fixture was built with
+`scripts/inject_alias_segments.py`.
 
 ### Key location
 
@@ -52,7 +69,7 @@ data differences aren't masked by metadata noise:
 
 ## File contents at a glance
 
-### `sample_a.dat` — 10 records, 4230 bytes
+### `sample_a.dat` — 10 records, 5880 bytes
 
 | Line | Key | Name (NM01) | TR01s | CL01 ts | Scenario |
 |---|---|---|---|---|---|
@@ -67,7 +84,7 @@ data differences aren't masked by metadata noise:
 | 9 | `KEY000000010` | IRENE S TAYLOR | T1, T2, T3 | **20250101** | CL01 timestamp differs vs B — matches after exclude |
 | 10 | `KEY000000011` | JAMES T MOORE | T1, T2, T3 | 20250709 | match |
 
-### `sample_b.dat` — 11 records, 4598 bytes
+### `sample_b.dat` — 11 records, 6413 bytes
 
 | Line | Key | Name (NM01) | TR01s | CL01 ts | Scenario |
 |---|---|---|---|---|---|
@@ -138,10 +155,12 @@ The stock `config/` directory targets this layout via two per-file
 layout files (ADR-033):
 
 - `config/layout_file_A.json` and `config/layout_file_B.json` declare
-  the same segments (TU4R, SH01, NM01, TR01, SC01, CL01, ENDS) with
-  the same per-segment field layouts. TU4R's `account_nbr` field is
-  marked `key: true` and sits after the 4-byte `"DATA"` prefix, so
-  the engine derives `key_range = [4, 16)` per file automatically.
+  the same segments (TU4R, SH01, NM01, AD01, EM01, EMAD, TR01, SC01,
+  CL01, ENDS) with the same per-segment field layouts, plus the
+  `AD01→EMAD after EM01` alias rule (ADR-034). TU4R's `account_nbr`
+  field is marked `key: true` and sits after the 4-byte `"DATA"`
+  prefix, so the engine derives `key_range = [4, 16)` per file
+  automatically.
 - The two comparison-irrelevant fields are flagged inline:
   - `ENDS.segment_count` (3 bytes): `exclude: true`.
   - `CL01.opened_date` (8 bytes, `YYYYMMDD`): `exclude: true`.

@@ -2,6 +2,8 @@
 import Panel from 'primevue/panel'
 import PrefixConfig from './PrefixConfig.vue'
 import SegmentEditor from './SegmentEditor.vue'
+// Segment-aliases authoring panel is hidden for now (see template below).
+// import AliasSegmentEditor from './AliasSegmentEditor.vue'
 import CompareKeyPanel from './CompareKeyPanel.vue'
 
 defineProps({
@@ -56,6 +58,29 @@ defineProps({
         />
       </div>
     </Panel>
+
+    <!--
+      Segment-aliases authoring panel — hidden for now. Re-enable by
+      uncommenting this block and the AliasSegmentEditor import above.
+      Template-baked aliases (e.g. EMAD) still render as read-only cards
+      in the Segments panel above via SegmentEditor's alias note.
+
+    <Panel toggleable>
+      <template #header>
+        <div class="panel-head">
+          <span class="material-symbols-outlined">alt_route</span>
+          <span class="t-title">Segment aliases</span>
+        </div>
+      </template>
+      <p class="t-small">
+        Place a logical segment (e.g. <code class="t-mono">EMAD</code>) that mirrors another
+        segment's layout (e.g. <code class="t-mono">AD01</code>) and is applied to every instance
+        appearing <strong>after</strong> a trigger segment (e.g. <code class="t-mono">EM01</code>).
+        Displayed as <em>EMAD (AD01 segment)</em>; the engine treats AD01-after-EM01 as EMAD.
+      </p>
+      <AliasSegmentEditor :template="template" :side="side" />
+    </Panel>
+    -->
   </div>
 </template>
 
