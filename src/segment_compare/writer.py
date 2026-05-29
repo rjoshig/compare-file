@@ -578,8 +578,6 @@ def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
     stamp = summary.filename_stamp
     e = html.escape
 
-    audit_short = e(summary.config_audit_hash[:16] + "…") if summary.config_audit_hash else ""
-
     layouts_html = _render_layouts_side_by_side(reports.layout_a, reports.layout_b, e)
     inputs_html = _render_inputs_side_by_side(summary, e)
     counts_html = _render_aggregate_counts(summary, stamp, e)
@@ -649,9 +647,7 @@ def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
 </head>
 <body>
 <h1>Compare report</h1>
-<div class="subhead">Run <span class="code">{e(stamp)}</span>
-  · engine {e(summary.engine_version)}
-  · audit <span class="code">{audit_short}</span></div>
+<div class="subhead">Run <span class="code">{e(stamp)}</span></div>
 
 <h2>Layouts</h2>
 {layouts_html}
@@ -733,10 +729,9 @@ def _render_one_layout(title: str, layout: "FileLayout", e: "Any") -> str:
 
     segments_html_parts = [
         f"<h3>{e(title)} segments</h3><table>",
-        "<tr><th>Segment</th><th class='num'>Size</th><th>Role</th><th>Fields</th></tr>",
+        "<tr><th>Segment</th><th class='num'>Size</th><th>Fields</th></tr>",
     ]
     for seg in layout.segments:
-        role = e(seg.role) if seg.role else ""
         field_list_parts = ['<ul class="field-list">']
         for fld in seg.fields:
             extras = []
@@ -754,7 +749,6 @@ def _render_one_layout(title: str, layout: "FileLayout", e: "Any") -> str:
         segments_html_parts.append(
             f"<tr><td class='code'>{e(seg.name)}</td>"
             f"<td class='num'>{seg.size}</td>"
-            f"<td>{role}</td>"
             f"<td>{fields_cell}</td></tr>"
         )
     segments_html_parts.append("</table>")
