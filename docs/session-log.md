@@ -9,6 +9,71 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-29 (Phase 3 kickoff — FastAPI backend + Vue dashboard + report polish)
+
+**Branch:** `dev`
+**Phase:** 3 (web UI)
+**Status:** Phase 3 first vertical slice is live end-to-end. Operator can pick files, configure layouts/keys/sort, save a config, run the engine, and open the HTML report — all from the browser.
+
+### What was completed
+
+**Backend (`src/segment_compare/api/`):**
+- `main.py` — FastAPI app factory with permissive CORS for the Vite dev server (`http://localhost:5173`, `http://127.0.0.1:5173`).
+- `models.py` — pydantic v2 wire schemas: `TemplateBundle`, `FileSideConfig`, `SaveConfigRequest`, `RunRequest`, `RunResponse`, `SavedConfigSummary`, etc.
+- `storage.py` — user-config persistence (one config = one directory; layout_file_A.json + layout_file_B.json + runtime.json + meta.json). UI-shape (template overrides + appended fields + per-side key/sort) projects into the engine's existing on-disk schema (ADR-033), so `load_config()` keeps working untouched. Storage root honors `SEGCMP_USER_CONFIGS_DIR` env var; defaults to `./user_configs/`.
+- `routes.py` — `/api/health`, `/api/template-layouts`, `/api/configs` (save + list), `/api/runs` (invoke pipeline), `/api/browse` (server-side filesystem browse for the UI's pickers, with `.dat/.csv/.txt` extension filter), `/api/runs/{token}/report` and `/api/runs/{token}/{name}` (base64url-encoded run dir in the URL *path* so the report HTML's bare relative file links resolve to a real endpoint).
+- `pyproject.toml` — new `[project.optional-dependencies].api` group (fastapi, uvicorn, pydantic) and dev-time httpx for TestClient.
+- `.gitignore` — added `user_configs/`.
+
+**Report HTML (`src/segment_compare/writer.py`):**
+- Re-skinned the report with Material 3 tokens, Inter / JetBrains Mono via Google Fonts, dark mode that follows OS preference + `?theme=light|dark` URL param + a header toggle.
+- Layouts section now renders segments as per-segment cards (one card per segment with role pill, size readout, and a `Field | Length | Exclude` table) — mirrors the dashboard's `SegmentEditor`.
+- Added an `Output dir` banner immediately under the `Compare report` headline so the operator sees where every file landed.
+- File links in the Aggregate counts and Per-key matrix sections are sibling relative paths that now resolve via the run-token route.
+
+**UI (`ui/`):**
+- Vue 3 + Vite + PrimeVue 4 (Material preset) + Inter + Material Symbols.
+- Sakai-style dashboard shell: collapsible icon sidebar (240 px ↔ 64 px, persisted in localStorage), 56 px topbar with hamburger toggle + breadcrumb + theme switch, mobile overlay below 992 px.
+- `FieldConfig` view: sticky file-header strip below the topbar, two-column body (File A | File B), 280 px right rail (Run + Save & Run).
+- Per-side panels under each file: **Compare key & sort** (key field Select + sorted checkbox + segmented Order/Type), **Per-record prefixes** (compact rows with `BIN | ASC` segmented buttons — no popups, no overflow), **Segments** (read-only template rows + add/save/edit lifecycle for user-added fields on TU4R via a `_saved` flag).
+- `FileBrowserDialog` — server-backed picker with breadcrumb, filter, home/up buttons. `pick-mode="dir"` variant powers the Output directory picker (hides files, exposes "Pick this folder").
+- Save & Run button shows an animated Material `progress_activity` icon, a pulsing outer ring, and an indeterminate progress bar while running.
+- `RunResultDialog` pops on completion: six metric cards (Matched / Mismatched / Only-in-A/B / Dups-in-A/B), output path, and a primary "Open report" button that opens the report in a new tab with the matching theme. Inline `RunResultPanel` is kept below the dashboard as history.
+- `useTheme` + `useLayout` composables (localStorage-backed).
+
+### Bugs fixed this session
+
+- **`_last_unsaved` 404 on run.** Blank Config name → save wrote to `_last_unsaved/` (reserved scratch slot) and returned that literal — then `runCompare` rejected it as "reserved." Fixed by letting `config_dir_for()` accept `_last_unsaved` (it's a real dir we created); only *new* names go through the reserved-name guard.
+- **Report file links 404'd.** Report was served at `/api/runs/report?run_dir=X`, so the browser resolved bare links like `matches.dat` to `/api/runs/matches.dat`. Fixed by moving the run dir into the URL path as a base64url token: `/api/runs/{token}/report` + `/api/runs/{token}/{name}`. Path-traversal-safe.
+
+### What's pending
+
+- Run History view (currently a "soon" tile in the sidebar).
+- Saved-config picker UI (backend list endpoint exists, but the UI always saves a new config). Want a left-rail "Configs" list with rename/delete.
+- Tests for the API package (`tests/test_api_*.py`). Backend test suite is unchanged (engine tests cover the core; the new routes have no coverage yet).
+- Bundle-size warning from Vite (>500 kB). PrimeVue + icons pull in a lot; consider code-splitting later.
+
+### Blockers
+
+None.
+
+### Branch / remote
+
+`dev`, pushed to `origin/dev`.
+
+### Next concrete action
+
+Write `tests/test_api_routes.py` covering: `/api/template-layouts` shape, `/api/configs` round-trip (save then list), `/api/runs/{token}/report` 404 on bad token, `/api/runs/{token}/{name}` path-traversal rejection. Then start the Run History view (read `user_configs/<name>/runs/` or a manifest the pipeline writes).
+
+### Notes for future me
+
+- The base64url run-token approach in `routes.py::_encode_run_token` is deliberate — using the path lets browser-relative links Just Work without rewriting the report HTML on the fly. The token decodes back to an absolute path; the file-serving endpoint enforces `target.resolve().relative_to(run_dir)` so traversal is blocked.
+- `SEGCMP_USER_CONFIGS_DIR` is the env knob to point storage somewhere outside the repo. Defaults to `./user_configs/`, which is now gitignored.
+- The UI talks to the engine *only* via the API. No engine code was modified — all storage/projection lives in `api/storage.py`. If the engine schema changes, only `_build_engine_layout` needs to follow it.
+- Sakai shell is hand-rolled (matching the Sakai-Vue pattern) rather than pulled in as a dep — keeps the bundle smaller and avoids the demo pages.
+
+---
+
 ## Session: 2026-05-28 (reports overhaul + per-run subdir + matches sample + v3 tag)
 
 **Branch:** `dev` → tagged **`v3`** at commit pushed in this session
