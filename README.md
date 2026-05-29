@@ -29,7 +29,7 @@ See `docs/architecture.md` for the full spec.
 
 ## What the tool produces
 
-Ten output files per run, written to a run-specific output directory:
+Eleven output files per run, written to a run-specific output directory:
 
 | File | Contents |
 |---|---|
@@ -41,8 +41,9 @@ Ten output files per run, written to a run-specific output directory:
 | `dups_B.dat` | Duplicate-key records pulled from File B |
 | `report.csv` | Per-mismatch rows (one row per mismatched segment-type per record) |
 | `summary.json` | Aggregates, timings, config hash, file metadata (machine-readable source of truth) |
-| `compare_reports.csv` | Same aggregates as `summary.json`, in a 3-column long-format CSV for spreadsheets (ADR-035) |
-| `compare_reports.html` | Same aggregates as `summary.json`, in a self-contained HTML page (inline CSS, no external assets) (ADR-035) |
+| `compare_reports.csv` | Same aggregates as `summary.json`, in a 3-column long-format CSV for spreadsheets, plus an `output_files` section linking each metric to its file (ADR-035 / ADR-036) |
+| `compare_reports.html` | Same aggregates rendered as a self-contained HTML page with side-by-side layouts, file-link aggregate counts, and a 20-row sample of the key matrix (ADR-035 / ADR-036) |
+| `keys_mismatch_matrix.csv` | Per-key Y/N matrix of which segments mismatched; one row per joined-key record with at least one segment mismatch + last column listing segments with count differences (ADR-036) |
 
 All filenames are stamped `<base>_YYYYMMDDHHMM.<ext>` (UTC) per ADR-027 — so successive runs in the same directory don't clobber each other.
 

@@ -129,4 +129,27 @@ def test_run_parallel_writes_summary_json_with_stamp(tmp_path: Path) -> None:
     assert (out / stamped_filename("summary.json", FIXED_STAMP)).exists()
     assert (out / stamped_filename("compare_reports.csv", FIXED_STAMP)).exists()
     assert (out / stamped_filename("compare_reports.html", FIXED_STAMP)).exists()
+    assert (out / stamped_filename("keys_mismatch_matrix.csv", FIXED_STAMP)).exists()
     assert summary.filename_stamp == FIXED_STAMP
+
+
+def test_run_parallel_keys_mismatch_matrix_carries_expected_rows(tmp_path: Path) -> None:
+    """Parallel matrix must list every mismatched key once, in sorted-key order."""
+    config = load_config(CONFIG_DIR)
+    out = tmp_path / "out"
+    run_parallel(
+        file_a=EXAMPLES / "sample_a.dat",
+        file_b=EXAMPLES / "sample_b.dat",
+        config=config,
+        output_dir=out,
+        workers=2,
+        run_timestamp=FIXED_TS,
+    )
+    matrix_path = out / stamped_filename("keys_mismatch_matrix.csv", FIXED_STAMP)
+    lines = matrix_path.read_text(encoding="utf-8").splitlines()
+    # Header + 3 mismatched keys (KEY...03 NM01, KEY...04 TR01 content, KEY...05 TR01 count).
+    assert lines[0].startswith("key,")
+    keys = [line.split(",")[0] for line in lines[1:]]
+    assert keys == ["KEY000000003", "KEY000000004", "KEY000000005"]
+    # KEY...05's last column carries TR01 (count_diff in B).
+    assert lines[3].rstrip().endswith(",TR01")

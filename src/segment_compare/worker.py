@@ -39,7 +39,7 @@ from segment_compare.hasher import build_hasher
 from segment_compare.layout import SegmentAlias
 from segment_compare.normalizer import FieldNormalizer
 from segment_compare.parser import ParserConfig, Record, Segment, SegmentsConfig, iter_records
-from segment_compare.writer import OutputWriter
+from segment_compare.writer import KeyMatrixEntry, OutputWriter, build_key_matrix_entry
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ class WorkerResult:
     records_mismatched: int
     per_segment_match: dict[str, int] = field(default_factory=dict)
     per_segment_mismatch: dict[str, int] = field(default_factory=dict)
+    key_matrix_entries: tuple[KeyMatrixEntry, ...] = ()
     elapsed_seconds: float = 0.0
 
 
@@ -131,6 +132,7 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
     mismatched = 0
     per_segment_match: dict[str, int] = defaultdict(int)
     per_segment_mismatch: dict[str, int] = defaultdict(int)
+    key_matrix_entries: list[KeyMatrixEntry] = []
 
     # Per-worker outputs use bare filenames (no stamp, no worker suffix);
     # the worker subdir already disambiguates them. The merger concatenates
@@ -154,6 +156,7 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
             else:
                 writer.write_mismatch(verdict, rec_a, rec_b)
                 mismatched += 1
+                key_matrix_entries.append(build_key_matrix_entry(verdict))
 
             for sv in verdict.segment_verdicts:
                 if sv.matched:
@@ -177,6 +180,7 @@ def run_worker(payload: WorkerPayload) -> WorkerResult:
         records_mismatched=mismatched,
         per_segment_match=dict(per_segment_match),
         per_segment_mismatch=dict(per_segment_mismatch),
+        key_matrix_entries=tuple(key_matrix_entries),
         elapsed_seconds=elapsed,
     )
 

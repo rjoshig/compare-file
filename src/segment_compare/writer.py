@@ -23,7 +23,13 @@ Output files (in the supplied output directory):
   hand (ADR-035).
 - ``compare_reports.html`` — the same aggregates rendered as a
   self-contained HTML report (inline CSS, no external assets) for
-  human review in a browser (ADR-035).
+  human review in a browser (ADR-035 / ADR-036).
+- ``keys_mismatch_matrix.csv`` — per-key Y/N matrix of which
+  segments mismatched (one row per joined-key record where at least
+  one segment failed; fully-matched keys omitted). Columns: ``key``
+  + one per known segment + ``segment_count_mismatch`` (pipe-
+  delimited list of segments whose count differs between A and B).
+  See ADR-036.
 """
 
 from __future__ import annotations
@@ -36,7 +42,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO, Any
 
-from segment_compare.comparator import RecordVerdict
+from segment_compare.comparator import STATUS_COUNT_DIFF, RecordVerdict
+from segment_compare.layout import FileLayout
 from segment_compare.parser import Record, SegmentsConfig
 
 MATCHES_FILE = "matches.dat"
@@ -49,6 +56,19 @@ REPORT_FILE = "report.csv"
 SUMMARY_FILE = "summary.json"
 COMPARE_REPORTS_CSV_FILE = "compare_reports.csv"
 COMPARE_REPORTS_HTML_FILE = "compare_reports.html"
+KEY_MATRIX_FILE = "keys_mismatch_matrix.csv"
+
+# Maps each aggregate-count metric to the output file where the
+# corresponding records can be found. Used by the HTML report to
+# render the counts table with a clickable file column.
+METRIC_TO_FILE: dict[str, str] = {
+    "records_matched": MATCHES_FILE,
+    "records_mismatched": MISMATCHES_FILE,
+    "keys_in_a_only": KEYMISMATCH_A_FILE,
+    "keys_in_b_only": KEYMISMATCH_B_FILE,
+    "dups_in_a": DUPS_A_FILE,
+    "dups_in_b": DUPS_B_FILE,
+}
 
 REPORT_HEADER = ("key", "segment_name", "status", "a_count", "b_count")
 
@@ -98,6 +118,53 @@ class SegmentSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class KeyMatrixEntry:
+    """One row of the per-key mismatch matrix (ADR-036).
+
+    Built once per joined-key record that didn't fully match.
+    Fully-matched records are not represented — the matrix is a
+    mismatch-only projection.
+
+    Attributes:
+        key: The joined record key.
+        segment_status: ``segment_name -> "Y" | "N"``. ``"Y"`` if the
+            segment's hash multiset matched between A and B in this
+            record; ``"N"`` if it did not. Segments not present in
+            either A's or B's record for this key are absent from the
+            mapping (the matrix renders them as empty cells).
+        segment_count_diffs: Segment names with ``status == count_diff``
+            for this record (A and B have a different number of
+            instances of that segment type). Pipe-delimited in the CSV
+            output.
+    """
+
+    key: str
+    segment_status: dict[str, str]
+    segment_count_diffs: tuple[str, ...]
+
+
+def build_key_matrix_entry(verdict: RecordVerdict) -> KeyMatrixEntry:
+    """Project a :class:`RecordVerdict` into a :class:`KeyMatrixEntry`.
+
+    Returns an entry for any verdict where at least one segment
+    mismatched. (For fully-matched verdicts the caller should skip
+    creating the entry; this helper does not enforce that, but the
+    matrix file omits matched records.)
+    """
+    status: dict[str, str] = {}
+    count_diffs: list[str] = []
+    for sv in verdict.segment_verdicts:
+        status[sv.segment_name] = "Y" if sv.matched else "N"
+        if sv.status == STATUS_COUNT_DIFF:
+            count_diffs.append(sv.segment_name)
+    return KeyMatrixEntry(
+        key=verdict.key,
+        segment_status=status,
+        segment_count_diffs=tuple(count_diffs),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class Summary:
     """Run summary serialized to ``summary.json``.
 
@@ -127,6 +194,34 @@ class Summary:
     config_audit_hash: str = ""
     engine_version: str = ""
     filename_stamp: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CompareReports:
+    """Bundle of everything the report-writing functions need (ADR-036).
+
+    Attributes:
+        summary: The run :class:`Summary` (machine-readable metrics).
+        layout_a: File A's loaded layout — rendered side-by-side in
+            the HTML report.
+        layout_b: File B's loaded layout.
+        key_matrix_entries: Mismatch-only per-key entries (sorted by
+            key, mirroring the join order). Used for both
+            ``keys_mismatch_matrix.csv`` (full file) and the HTML
+            report's "Per-key mismatch sample" section.
+        matrix_segments: Union of segment names across both layouts in
+            stable order — the column order for the matrix CSV.
+        output_dir: Resolved run output directory. The HTML's clickable
+            file links resolve relative to this so the HTML works when
+            opened directly from disk.
+    """
+
+    summary: Summary
+    layout_a: FileLayout
+    layout_b: FileLayout
+    key_matrix_entries: tuple[KeyMatrixEntry, ...]
+    matrix_segments: tuple[str, ...]
+    output_dir: Path
 
 
 class OutputWriter:
@@ -293,21 +388,28 @@ class OutputWriter:
     # Finalization
     # ------------------------------------------------------------------
 
-    def finalize(self, summary: Summary) -> None:
-        """Write ``summary.json`` + the two human reports and close all handles.
+    def finalize(self, reports: CompareReports) -> None:
+        """Write ``summary.json`` + the three human reports and close all handles.
 
-        The CSV and HTML report files carry the same metrics as
-        ``summary.json`` (ADR-035); JSON remains the machine-readable
-        source of truth.
+        Emits, in this order:
+
+        - ``summary.json`` (machine-readable, ADR-023)
+        - ``compare_reports.csv`` (3-column long-format, ADR-035)
+        - ``compare_reports.html`` (self-contained HTML, ADR-036)
+        - ``keys_mismatch_matrix.csv`` (per-key Y/N matrix, ADR-036)
+
+        The four files all carry the same stamp suffix used by the
+        binary outputs so a single run lands as a self-contained
+        bundle on disk.
         """
-        summary_path = self._output_dir / self._on_disk(SUMMARY_FILE)
-        write_summary(summary, summary_path)
+        write_summary(reports.summary, self._output_dir / self._on_disk(SUMMARY_FILE))
         write_compare_reports_csv(
-            summary, self._output_dir / self._on_disk(COMPARE_REPORTS_CSV_FILE)
+            reports, self._output_dir / self._on_disk(COMPARE_REPORTS_CSV_FILE)
         )
         write_compare_reports_html(
-            summary, self._output_dir / self._on_disk(COMPARE_REPORTS_HTML_FILE)
+            reports, self._output_dir / self._on_disk(COMPARE_REPORTS_HTML_FILE)
         )
+        write_keys_mismatch_matrix_csv(reports, self._output_dir / self._on_disk(KEY_MATRIX_FILE))
         self.close()
 
     # ------------------------------------------------------------------
@@ -347,7 +449,7 @@ def write_summary(summary: Summary, path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Human reports (ADR-035) — CSV + HTML alongside summary.json
+# Human reports (ADR-035 / ADR-036) — CSV + HTML alongside summary.json
 # ---------------------------------------------------------------------------
 
 # Order matters: section names group related metrics, and within each
@@ -355,18 +457,26 @@ def write_summary(summary: Summary, path: Path) -> None:
 # predictably across runs with identical inputs.
 _CONFIG_PATH_ORDER = ("layout_a", "layout_b", "runtime")
 
+# How many matrix rows to embed inline in the HTML report. The full
+# matrix lives in keys_mismatch_matrix.csv.
+_HTML_KEY_MATRIX_SAMPLE_SIZE = 20
 
-def write_compare_reports_csv(summary: Summary, path: Path) -> None:
-    """Render ``summary`` as a 3-column long-format CSV (ADR-035).
+
+def write_compare_reports_csv(reports: CompareReports, path: Path) -> None:
+    """Render a :class:`CompareReports` as a 3-column long-format CSV (ADR-035).
 
     Columns are ``section,key,value``. Sections (in order): ``run``,
-    ``inputs``, ``counts``, ``per_segment``, ``timing``,
-    ``config_paths``. Per-segment metrics use ``<segment>.<stat>``
-    style keys so a single segment's four numbers stay grouped.
+    ``inputs``, ``counts``, ``per_segment``, ``output_files``,
+    ``timing``, ``config_paths``. Per-segment metrics use
+    ``<segment>.<stat>`` style keys so a single segment's four numbers
+    stay grouped.
 
     Opens cleanly in any spreadsheet (Excel, Google Sheets, Numbers)
     and is trivially filterable with ``awk`` / ``grep``.
     """
+    summary = reports.summary
+    stamp = summary.filename_stamp
+
     with path.open("w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(("section", "key", "value"))
@@ -400,6 +510,16 @@ def write_compare_reports_csv(summary: Summary, path: Path) -> None:
             w.writerow(("per_segment", f"{seg.segment_name}.total_in_a", seg.total_in_a))
             w.writerow(("per_segment", f"{seg.segment_name}.total_in_b", seg.total_in_b))
 
+        # Output files — each count metric paired with the run-stamped
+        # file that holds the corresponding records (ADR-036).
+        for metric, base in METRIC_TO_FILE.items():
+            w.writerow(("output_files", metric, stamped_filename(base, stamp)))
+        w.writerow(("output_files", "report", stamped_filename(REPORT_FILE, stamp)))
+        w.writerow(("output_files", "summary", stamped_filename(SUMMARY_FILE, stamp)))
+        w.writerow(
+            ("output_files", "keys_mismatch_matrix", stamped_filename(KEY_MATRIX_FILE, stamp))
+        )
+
         # Timing
         w.writerow(("timing", "start_time", summary.start_time))
         w.writerow(("timing", "end_time", summary.end_time))
@@ -417,94 +537,69 @@ def write_compare_reports_csv(summary: Summary, path: Path) -> None:
                 w.writerow(("config_paths", kind, p))
 
 
-def write_compare_reports_html(summary: Summary, path: Path) -> None:
-    """Render ``summary`` as a self-contained HTML report (ADR-035).
+def write_keys_mismatch_matrix_csv(reports: CompareReports, path: Path) -> None:
+    """Write the per-key mismatch matrix to ``path`` (ADR-036).
 
-    All CSS is inline; no external assets are referenced, so the file
-    can be opened directly from disk or attached to an email. Every
-    metric from :class:`Summary` is shown — sectioned into Inputs,
-    Aggregate counts, Per-segment breakdown, Timing, and Config
-    provenance — with numbers right-aligned and thousand-separated.
+    Columns: ``key``, one column per segment in
+    ``reports.matrix_segments`` (in declared order), then
+    ``segment_count_mismatch``. Cells carry ``"Y"`` (matched in this
+    record), ``"N"`` (mismatched), or empty (segment absent from
+    both sides for this key). The trailing column is a pipe-delimited
+    list of segments where A and B had different counts for this key
+    (status=``count_diff``).
+
+    Only mismatched-key rows are written — fully-matched records are
+    intentionally omitted to keep the file small and focused.
     """
+    columns = list(reports.matrix_segments)
+    header = ["key"] + columns + ["segment_count_mismatch"]
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(header)
+        for entry in reports.key_matrix_entries:
+            row: list[str] = [entry.key]
+            for col in columns:
+                row.append(entry.segment_status.get(col, ""))
+            row.append("|".join(entry.segment_count_diffs))
+            w.writerow(row)
+
+
+def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
+    """Render a :class:`CompareReports` as a self-contained HTML report (ADR-036).
+
+    All CSS is inline; no external assets are referenced. Sections (in
+    order): Layouts (File A and File B side-by-side), Inputs
+    (side-by-side columns), Aggregate counts (with clickable
+    file-path links), Per-segment breakdown, Per-key mismatch sample
+    (first ~20 rows from ``keys_mismatch_matrix.csv``), Timing, and
+    Config provenance.
+    """
+    summary = reports.summary
+    stamp = summary.filename_stamp
     e = html.escape
 
-    rows_inputs = [
-        (
-            "File A",
-            e(str(summary.file_a_path)),
-            f"{summary.file_a_size_bytes:,}",
-            f"{summary.file_a_record_count:,}",
-        ),
-        (
-            "File B",
-            e(str(summary.file_b_path)),
-            f"{summary.file_b_size_bytes:,}",
-            f"{summary.file_b_record_count:,}",
-        ),
-    ]
-    inputs_rows_html = "".join(
-        f"<tr><td>{side}</td><td class='code'>{path_}</td>"
-        f"<td class='num'>{size}</td><td class='num'>{n}</td></tr>"
-        for side, path_, size, n in rows_inputs
-    )
-
-    counts_rows = (
-        ("Records matched", f"{summary.records_matched:,}", "match"),
-        ("Records mismatched", f"{summary.records_mismatched:,}", "mismatch"),
-        ("Keys in both", f"{summary.keys_in_both:,}", ""),
-        ("Keys only in A", f"{summary.keys_in_a_only:,}", ""),
-        ("Keys only in B", f"{summary.keys_in_b_only:,}", ""),
-        ("Duplicate keys in A", f"{summary.dups_in_a:,}", ""),
-        ("Duplicate keys in B", f"{summary.dups_in_b:,}", ""),
-    )
-    counts_rows_html = "".join(
-        f"<tr><td class='{css}'>{label}</td><td class='num'>{val}</td></tr>"
-        for label, val, css in counts_rows
-    )
-
-    per_segment_rows_html = "".join(
-        f"<tr><td class='code'>{e(seg.segment_name)}</td>"
-        f"<td class='num'>{seg.match_count:,}</td>"
-        f"<td class='num'>{seg.mismatch_count:,}</td>"
-        f"<td class='num'>{seg.total_in_a:,}</td>"
-        f"<td class='num'>{seg.total_in_b:,}</td></tr>"
-        for seg in summary.per_segment
-    )
-
-    timing_rows_html = (
-        f"<tr><td>Start time (UTC)</td><td class='code'>{e(summary.start_time)}</td></tr>"
-        f"<tr><td>End time (UTC)</td><td class='code'>{e(summary.end_time)}</td></tr>"
-        f"<tr><td>Elapsed</td>"
-        f"<td class='num'>{summary.elapsed_seconds:.3f} s</td></tr>"
-        f"<tr><td>Throughput</td>"
-        f"<td class='num'>{summary.throughput_records_per_sec:,.1f} records/s</td></tr>"
-    )
-
-    config_path_rows = []
-    seen_cp: set[str] = set()
-    for kind in _CONFIG_PATH_ORDER:
-        if kind in summary.config_paths:
-            config_path_rows.append((kind, summary.config_paths[kind]))
-            seen_cp.add(kind)
-    for kind, p in summary.config_paths.items():
-        if kind not in seen_cp:
-            config_path_rows.append((kind, p))
-    config_paths_html = "".join(
-        f"<tr><td>{e(kind)}</td><td class='code'>{e(p)}</td></tr>" for kind, p in config_path_rows
-    )
-
     audit_short = e(summary.config_audit_hash[:16] + "…") if summary.config_audit_hash else ""
+
+    layouts_html = _render_layouts_side_by_side(reports.layout_a, reports.layout_b, e)
+    inputs_html = _render_inputs_side_by_side(summary, e)
+    counts_html = _render_aggregate_counts(summary, stamp, e)
+    per_segment_html = _render_per_segment(summary, e)
+    matrix_sample_html = _render_key_matrix_sample(
+        reports.key_matrix_entries, reports.matrix_segments, stamp, e
+    )
+    timing_html = _render_timing(summary, e)
+    config_paths_html = _render_config_paths(summary, e)
 
     doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Compare report — {e(summary.filename_stamp)}</title>
+<title>Compare report — {e(stamp)}</title>
 <style>
   body {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
                  "Helvetica Neue", Arial, sans-serif;
-    max-width: 1040px; margin: 2em auto; padding: 0 1em; color: #222;
+    max-width: 1180px; margin: 2em auto; padding: 0 1em; color: #222;
   }}
   h1 {{ font-size: 1.6em; margin-bottom: 0.2em; }}
   .subhead {{ color: #666; font-size: 0.9em; margin-bottom: 1.5em; }}
@@ -512,63 +607,317 @@ def write_compare_reports_html(summary: Summary, path: Path) -> None:
     font-size: 1.1em; margin-top: 2.2em; margin-bottom: 0.4em;
     border-bottom: 1px solid #ddd; padding-bottom: 0.25em;
   }}
+  h3 {{ font-size: 0.95em; margin: 1em 0 0.4em 0; color: #444; }}
   table {{
     border-collapse: collapse; margin-top: 0.4em; width: 100%;
-    font-size: 0.95em;
+    font-size: 0.92em;
   }}
   th, td {{
     padding: 0.4em 0.7em; text-align: left;
-    border-bottom: 1px solid #eee;
+    border-bottom: 1px solid #eee; vertical-align: top;
   }}
   th {{ background: #f6f6f6; font-weight: 600; }}
   tr:nth-child(even) td {{ background: #fafafa; }}
   .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   .match {{ color: #1f7a1f; font-weight: 600; }}
   .mismatch {{ color: #b04040; font-weight: 600; }}
+  .y {{ color: #1f7a1f; font-weight: 600; text-align: center; }}
+  .n {{ color: #b04040; font-weight: 600; text-align: center; }}
+  .blank {{ color: #ccc; text-align: center; }}
   .code {{
     font-family: ui-monospace, SFMono-Regular, "Menlo", Consolas, monospace;
     font-size: 0.88em; word-break: break-all;
   }}
+  .sxs {{ display: flex; gap: 1.2em; }}
+  .sxs > div {{ flex: 1; min-width: 0; }}
+  .sxs h3 {{
+    margin-top: 0; padding-bottom: 0.2em; border-bottom: 1px solid #ddd;
+  }}
+  .meta dt {{
+    font-weight: 600; color: #555; float: left; clear: left;
+    width: 9em; margin-right: 0.5em;
+  }}
+  .meta dd {{ margin-left: 9.5em; margin-bottom: 0.2em; }}
+  .field-list {{ font-size: 0.85em; padding-left: 1em; margin: 0.2em 0 0.6em 0; }}
+  .field-list li {{ margin: 0.1em 0; list-style: disc; }}
+  .field-list .ex {{ color: #999; font-style: italic; }}
+  .field-list .key {{ color: #1a5bb8; font-weight: 600; }}
+  .sample-note {{ color: #666; font-size: 0.85em; margin-top: 0.5em; }}
+  a.fileref {{ color: #1a5bb8; text-decoration: none; }}
+  a.fileref:hover {{ text-decoration: underline; }}
 </style>
 </head>
 <body>
 <h1>Compare report</h1>
-<div class="subhead">Run <span class="code">{e(summary.filename_stamp)}</span>
+<div class="subhead">Run <span class="code">{e(stamp)}</span>
   · engine {e(summary.engine_version)}
   · audit <span class="code">{audit_short}</span></div>
 
+<h2>Layouts</h2>
+{layouts_html}
+
 <h2>Inputs</h2>
-<table>
-<tr><th>File</th><th>Path</th><th class="num">Size (bytes)</th><th class="num">Records</th></tr>
-{inputs_rows_html}
-</table>
+{inputs_html}
 
 <h2>Aggregate counts</h2>
-<table>
-<tr><th>Metric</th><th class="num">Value</th></tr>
-{counts_rows_html}
-</table>
+{counts_html}
 
 <h2>Per-segment breakdown</h2>
-<table>
-<tr><th>Segment</th><th class="num">Match</th><th class="num">Mismatch</th>
-<th class="num">Total in A</th><th class="num">Total in B</th></tr>
-{per_segment_rows_html}
-</table>
+{per_segment_html}
+
+<h2>Per-key mismatch sample</h2>
+{matrix_sample_html}
 
 <h2>Timing</h2>
-<table>
-<tr><th>Metric</th><th>Value</th></tr>
-{timing_rows_html}
-</table>
+{timing_html}
 
 <h2>Config provenance</h2>
-<table>
-<tr><th>Kind</th><th>Path</th></tr>
 {config_paths_html}
-</table>
 
 </body>
 </html>
 """
     path.write_text(doc, encoding="utf-8")
+
+
+def _render_layouts_side_by_side(layout_a: FileLayout, layout_b: FileLayout, e: "Any") -> str:
+    """Two-column flex layout comparing File A's layout to File B's."""
+    return (
+        '<div class="sxs">'
+        f"<div>{_render_one_layout('File A', layout_a, e)}</div>"
+        f"<div>{_render_one_layout('File B', layout_b, e)}</div>"
+        "</div>"
+    )
+
+
+def _render_one_layout(title: str, layout: "FileLayout", e: "Any") -> str:
+    """One column of the side-by-side layout view."""
+    ff = layout.file_format
+    key_seg = layout.key_segment
+    key_field = layout.key_field
+    key_range = layout.key_range
+    rdw_desc = (
+        f"{layout.rdw.total_bytes} bytes ({layout.rdw.encoding})"
+        if layout.rdw is not None
+        else "none"
+    )
+    strip_desc = (
+        f"{layout.strip_leading_bytes.size} bytes ({layout.strip_leading_bytes.encoding})"
+        if layout.strip_leading_bytes is not None
+        else "none"
+    )
+    aliases_desc = (
+        ", ".join(
+            f"{e(a.wire_name)}→{e(a.logical_name)} after {e(a.after_segment)}"
+            for a in layout.segment_aliases
+        )
+        or "none"
+    )
+
+    meta_html = (
+        '<dl class="meta">'
+        f"<dt>Layout file</dt><dd class='code'>{e(layout.source_path.name)}</dd>"
+        f"<dt>Key segment</dt><dd class='code'>{e(key_seg.name)}</dd>"
+        f"<dt>Key field</dt><dd class='code'>{e(key_field.name)}</dd>"
+        f"<dt>Key range</dt><dd class='code'>[{key_range[0]}, {key_range[1]})"
+        f" ({key_field.length} bytes)</dd>"
+        f"<dt>End segment</dt><dd class='code'>{e(layout.end_segment.name)}</dd>"
+        f"<dt>Record delim</dt><dd class='code'>{e(repr(ff.record_delimiter))}</dd>"
+        f"<dt>Strip prefix</dt><dd>{strip_desc}</dd>"
+        f"<dt>RDW</dt><dd>{rdw_desc}</dd>"
+        f"<dt>Aliases</dt><dd>{aliases_desc}</dd>"
+        f"<dt>Sort</dt><dd>input_sorted={layout.sort.input_sorted}, "
+        f"order={e(layout.sort.order)}, key_type={e(layout.sort.key_type)}</dd>"
+        "</dl>"
+    )
+
+    segments_html_parts = [
+        f"<h3>{e(title)} segments</h3><table>",
+        "<tr><th>Segment</th><th class='num'>Size</th><th>Role</th><th>Fields</th></tr>",
+    ]
+    for seg in layout.segments:
+        role = e(seg.role) if seg.role else ""
+        field_list_parts = ['<ul class="field-list">']
+        for fld in seg.fields:
+            extras = []
+            if fld.key:
+                extras.append('<span class="key">KEY</span>')
+            if fld.exclude:
+                extras.append('<span class="ex">exclude</span>')
+            extras_str = (" — " + ", ".join(extras)) if extras else ""
+            field_list_parts.append(
+                f"<li><span class='code'>{e(fld.name)}</span>"
+                f" ({fld.length} bytes){extras_str}</li>"
+            )
+        field_list_parts.append("</ul>")
+        fields_cell = "".join(field_list_parts)
+        segments_html_parts.append(
+            f"<tr><td class='code'>{e(seg.name)}</td>"
+            f"<td class='num'>{seg.size}</td>"
+            f"<td>{role}</td>"
+            f"<td>{fields_cell}</td></tr>"
+        )
+    segments_html_parts.append("</table>")
+    segments_html = "".join(segments_html_parts)
+
+    return f"<h3>{e(title)} — overview</h3>{meta_html}{segments_html}"
+
+
+def _render_inputs_side_by_side(summary: "Summary", e: "Any") -> str:
+    """Inputs section as a side-by-side metric/A/B table."""
+    rows = [
+        (
+            "Path",
+            f"<span class='code'>{e(str(summary.file_a_path))}</span>",
+            f"<span class='code'>{e(str(summary.file_b_path))}</span>",
+        ),
+        (
+            "Size (bytes)",
+            f"<span class='num'>{summary.file_a_size_bytes:,}</span>",
+            f"<span class='num'>{summary.file_b_size_bytes:,}</span>",
+        ),
+        (
+            "Record count",
+            f"<span class='num'>{summary.file_a_record_count:,}</span>",
+            f"<span class='num'>{summary.file_b_record_count:,}</span>",
+        ),
+    ]
+    rows_html = "".join(
+        f"<tr><td>{label}</td><td>{a}</td><td>{b}</td></tr>" for label, a, b in rows
+    )
+    return (
+        "<table>" "<tr><th>Metric</th><th>File A</th><th>File B</th></tr>" f"{rows_html}" "</table>"
+    )
+
+
+def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
+    """Counts table with a clickable file-link column (ADR-036)."""
+    rows = (
+        ("Records matched", summary.records_matched, "match", "records_matched"),
+        ("Records mismatched", summary.records_mismatched, "mismatch", "records_mismatched"),
+        ("Keys in both", summary.keys_in_both, "", None),
+        ("Keys only in A", summary.keys_in_a_only, "", "keys_in_a_only"),
+        ("Keys only in B", summary.keys_in_b_only, "", "keys_in_b_only"),
+        ("Duplicate keys in A", summary.dups_in_a, "", "dups_in_a"),
+        ("Duplicate keys in B", summary.dups_in_b, "", "dups_in_b"),
+    )
+
+    def _file_cell(metric_key: "str | None") -> str:
+        if metric_key is None:
+            return "—"
+        base = METRIC_TO_FILE.get(metric_key)
+        if base is None:
+            return "—"
+        href = stamped_filename(base, stamp)
+        return f"<a class='fileref' href='{e(href)}'>{e(href)}</a>"
+
+    rows_html = "".join(
+        f"<tr><td class='{css}'>{label}</td>"
+        f"<td class='num'>{val:,}</td>"
+        f"<td>{_file_cell(metric_key)}</td></tr>"
+        for label, val, css, metric_key in rows
+    )
+    return (
+        "<table>"
+        "<tr><th>Metric</th><th class='num'>Value</th><th>File</th></tr>"
+        f"{rows_html}"
+        "</table>"
+    )
+
+
+def _render_per_segment(summary: "Summary", e: "Any") -> str:
+    rows_html = "".join(
+        f"<tr><td class='code'>{e(seg.segment_name)}</td>"
+        f"<td class='num'>{seg.match_count:,}</td>"
+        f"<td class='num'>{seg.mismatch_count:,}</td>"
+        f"<td class='num'>{seg.total_in_a:,}</td>"
+        f"<td class='num'>{seg.total_in_b:,}</td></tr>"
+        for seg in summary.per_segment
+    )
+    return (
+        "<table>"
+        "<tr><th>Segment</th><th class='num'>Match</th><th class='num'>Mismatch</th>"
+        "<th class='num'>Total in A</th><th class='num'>Total in B</th></tr>"
+        f"{rows_html}"
+        "</table>"
+    )
+
+
+def _render_key_matrix_sample(
+    entries: tuple[KeyMatrixEntry, ...],
+    segments: tuple[str, ...],
+    stamp: str,
+    e: "Any",
+) -> str:
+    """First ~20 rows of the per-key mismatch matrix, with a link to the full file."""
+    full_file = stamped_filename(KEY_MATRIX_FILE, stamp)
+    full_link = f"<a class='fileref' href='{e(full_file)}'>{e(full_file)}</a>"
+
+    if not entries:
+        return (
+            f"<p class='sample-note'>No mismatched records — "
+            f"{full_link} contains only the header row.</p>"
+        )
+
+    cols = list(segments)
+    sample = entries[:_HTML_KEY_MATRIX_SAMPLE_SIZE]
+
+    head_cells = "".join(f"<th class='num'>{e(c)}</th>" for c in cols)
+    body_rows: list[str] = []
+    for entry in sample:
+        cells = []
+        for col in cols:
+            v = entry.segment_status.get(col, "")
+            if v == "Y":
+                cells.append("<td class='y'>Y</td>")
+            elif v == "N":
+                cells.append("<td class='n'>N</td>")
+            else:
+                cells.append("<td class='blank'>·</td>")
+        count_diff = "|".join(entry.segment_count_diffs)
+        cells.append(f"<td class='code'>{e(count_diff)}</td>")
+        body_rows.append(f"<tr><td class='code'>{e(entry.key)}</td>{''.join(cells)}</tr>")
+    body = "".join(body_rows)
+
+    note = (
+        f"<p class='sample-note'>Showing {len(sample)} of "
+        f"{len(entries):,} mismatched keys. "
+        f"Full matrix: {full_link}</p>"
+    )
+    return (
+        "<table>"
+        f"<tr><th>Key</th>{head_cells}<th>segment_count_mismatch</th></tr>"
+        f"{body}"
+        "</table>"
+        f"{note}"
+    )
+
+
+def _render_timing(summary: "Summary", e: "Any") -> str:
+    return (
+        "<table>"
+        "<tr><th>Metric</th><th>Value</th></tr>"
+        f"<tr><td>Start time (UTC)</td><td class='code'>{e(summary.start_time)}</td></tr>"
+        f"<tr><td>End time (UTC)</td><td class='code'>{e(summary.end_time)}</td></tr>"
+        f"<tr><td>Elapsed</td>"
+        f"<td class='num'>{summary.elapsed_seconds:.3f} s</td></tr>"
+        f"<tr><td>Throughput</td>"
+        f"<td class='num'>{summary.throughput_records_per_sec:,.1f} records/s</td></tr>"
+        "</table>"
+    )
+
+
+def _render_config_paths(summary: "Summary", e: "Any") -> str:
+    rows = []
+    seen_cp: set[str] = set()
+    for kind in _CONFIG_PATH_ORDER:
+        if kind in summary.config_paths:
+            rows.append((kind, summary.config_paths[kind]))
+            seen_cp.add(kind)
+    for kind, p in summary.config_paths.items():
+        if kind not in seen_cp:
+            rows.append((kind, p))
+    rows_html = "".join(
+        f"<tr><td>{e(kind)}</td><td class='code'>{e(p)}</td></tr>" for kind, p in rows
+    )
+    return f"<table><tr><th>Kind</th><th>Path</th></tr>{rows_html}</table>"

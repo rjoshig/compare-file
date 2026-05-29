@@ -1112,6 +1112,172 @@ same dataclass.
 
 ---
 
+## ADR-036 — Per-key mismatch matrix + HTML report overhaul
+
+**Status:** accepted; extends ADR-035
+
+**Context:** After ADR-035, the run produced ``summary.json`` plus a
+flat CSV and a row-wise HTML rendering of the same aggregates. Real
+operators reviewing run results raised four concrete gaps:
+
+1. **No per-record visibility.** The per-segment breakdown shows
+   *how many* records had a mismatch in (say) ``NM01``, but not
+   *which keys* mismatched on which segments. For triage, the
+   operator wants a key-by-key matrix.
+2. **No layout context in the report.** The HTML didn't show what the
+   two files claimed to look like. Reviewing a mismatch without
+   seeing the two layouts side-by-side forces a separate
+   layout-file diff.
+3. **Aggregate counts didn't link to the records.** "3 mismatches" is
+   an integer; the operator immediately wants ``mismatches.dat`` open.
+   The HTML didn't link to it.
+4. **Side-by-side metrics, not row-wise.** Operators compare File A
+   to File B; rendering each File-A value above the corresponding
+   File-B value (two rows) is harder to scan than two columns.
+
+**Decision:** Three changes:
+
+### 1. New output file ``keys_mismatch_matrix_<stamp>.csv``
+
+One row per joined-key record where at least one segment mismatched
+(fully-matched records are intentionally omitted). Columns:
+
+```csv
+key,<seg1>,<seg2>,...,<segN>,segment_count_mismatch
+```
+
+- The segment columns are the union of segment names declared across
+  ``layout_file_A.json`` and ``layout_file_B.json``, in File A's
+  declared order with B's extras appended (``EngineConfig.known_segments``).
+- Each cell is ``Y`` (segment matched in this record), ``N`` (segment
+  mismatched), or empty (segment absent from both A's and B's record
+  for this key).
+- The trailing ``segment_count_mismatch`` column is a pipe-delimited
+  list of segments whose count differs between A and B for this key
+  (``status == count_diff``). Empty when no count differences exist
+  for the key.
+
+Implementation: ``pipeline.run`` and ``worker.run_worker`` build a
+:class:`KeyMatrixEntry` whenever ``compare_records`` returns a
+non-matched verdict. Single-process buffers them in memory; the
+parallel master concatenates per-worker tuples in worker-id order
+(which mirrors the join's sorted-key order). The full file is
+written once at run end via ``write_keys_mismatch_matrix_csv``.
+
+### 2. HTML report overhaul
+
+The HTML report adds three new sections and rearranges one:
+
+- **Layouts** (new) — File A and File B layouts side-by-side in a
+  CSS-flex two-column block. Each column shows: layout filename,
+  key segment / key field / key range, end segment, record
+  delimiter, strip prefix, RDW, segment aliases, sort metadata, and
+  a per-segment table with field-by-field breakdowns (KEY/exclude
+  flags highlighted).
+- **Inputs** (reworked) — now a side-by-side table with one column
+  per file (Metric / File A / File B) instead of one row per file.
+  The user explicitly asked for "side by side metrics in HTML not
+  row wise."
+- **Aggregate counts** (extended) — adds a "File" column whose cells
+  are clickable relative-path links to the stamped output file for
+  that metric: ``Records matched`` → ``matches_<stamp>.dat``,
+  ``Duplicate keys in A`` → ``dups_A_<stamp>.dat``, etc. The
+  ``keys_in_both`` row shows ``—`` since no single output file
+  contains "the matches and mismatches together"; that's
+  ``report.csv``'s job, surfaced separately in the CSV report's
+  ``output_files`` section.
+- **Per-key mismatch sample** (new) — first 20 rows from the
+  matrix, rendered as a styled HTML table (Y = green, N = red,
+  empty = grey dot). Includes a "Showing N of M" caption and a
+  clickable link to the full CSV.
+
+The Per-segment, Timing, and Config-provenance sections are
+unchanged.
+
+### 3. ``compare_reports.csv`` gains an ``output_files`` section
+
+New section in the 3-column long-format CSV mapping each metric to
+its run-stamped output filename:
+
+```csv
+output_files,records_matched,matches_202605290401.dat
+output_files,records_mismatched,mismatches_202605290401.dat
+output_files,keys_in_a_only,keymismatch_A_202605290401.dat
+output_files,keys_in_b_only,keymismatch_B_202605290401.dat
+output_files,dups_in_a,dups_A_202605290401.dat
+output_files,dups_in_b,dups_B_202605290401.dat
+output_files,report,report_202605290401.csv
+output_files,summary,summary_202605290401.json
+output_files,keys_mismatch_matrix,keys_mismatch_matrix_202605290401.csv
+```
+
+Spreadsheet users can pivot on the section to navigate from a
+metric to its source file without rereading the docs.
+
+### Engine wiring
+
+- New :class:`KeyMatrixEntry` dataclass + ``build_key_matrix_entry``
+  helper in ``writer.py``.
+- New :class:`CompareReports` dataclass bundling
+  ``summary + layout_a + layout_b + key_matrix_entries +
+  matrix_segments + output_dir``. The report-writing functions take
+  this bundle, so adding a new metric only touches ``Summary`` and
+  the writers — no signature churn at the engine call sites beyond
+  the bundle construction.
+- ``OutputWriter.finalize(reports)`` writes all four report files
+  (summary.json + the three human reports) in one step.
+- ``WorkerResult`` gains ``key_matrix_entries: tuple[KeyMatrixEntry, ...]``.
+- ``pipeline.run_parallel`` master folds per-worker entries by
+  concatenation in worker-id order and writes the full matrix file +
+  the HTML/CSV reports after the per-record merge completes.
+- The parallel master's pre-cleanup list now includes
+  ``keys_mismatch_matrix.csv`` so a worker crash doesn't leave a
+  stale matrix from a previous run in place.
+
+### Output count per run
+
+Goes from 10 → 11 (added: ``keys_mismatch_matrix.csv``):
+``matches.dat``, ``mismatches.dat``, ``keymismatch_A.dat``,
+``keymismatch_B.dat``, ``dups_A.dat``, ``dups_B.dat``,
+``report.csv``, ``summary.json``, ``compare_reports.csv``,
+``compare_reports.html``, ``keys_mismatch_matrix.csv``.
+
+### Memory cost
+
+The matrix entries buffer in memory during the run. At the 3M-record
+target with ~10% mismatch rate, that's ~300K entries × ~200 bytes
+each ≈ 60 MB — within budget. If a future workload pushes this past
+RAM, switch to per-worker file streaming (workers write CSV slices
+to disk, master concatenates with header inserted once); the schema
+doesn't need to change.
+
+### Consequences
+
+- Operators get key-level triage data without scripting against
+  ``mismatches.dat``.
+- The HTML is now a one-stop "what happened in this run" page: open
+  it in a browser, see the layouts, the aggregate counts (linked),
+  the per-segment breakdown, and a sample of which keys went wrong.
+- The matrix is mismatch-only by design. If a future need wants
+  "every joined key with its Y/N matrix even if fully matched",
+  that's a separate file (proposed name:
+  ``keys_full_matrix.csv``) since the size could grow to the full
+  inner-join count.
+- ``OutputWriter.finalize``'s signature changed from
+  ``finalize(summary)`` to ``finalize(reports)``. Only the pipeline
+  modules and tests call it; updated everywhere.
+- 13 new writer tests cover: matrix header, matrix row content,
+  matrix-empty-when-no-mismatches, HTML layouts section,
+  HTML side-by-side rendering, HTML aggregate-count file links, HTML
+  per-key sample with link to full file, CSV ``output_files``
+  section. Plus a parallel-pipeline test asserting the parallel
+  master emits the matrix with the right rows.
+- ``ADR-035`` is extended (HTML structure now richer); the CSV
+  long-format contract is unchanged except for the additive
+  ``output_files`` section.
+
+---
+
 ## ADR-033 — Single per-file layout config replaces segments.json + normalization.json
 
 **Status:** accepted (Stage 1: schema landed); supersedes **ADR-007**

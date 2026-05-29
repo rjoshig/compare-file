@@ -52,12 +52,16 @@ from segment_compare.partitioner import equal_count_partition
 from segment_compare.worker import WorkerPayload, WorkerResult, run_worker
 from segment_compare.writer import (
     STAMP_FORMAT,
+    CompareReports,
+    KeyMatrixEntry,
     OutputWriter,
     SegmentSummary,
     Summary,
+    build_key_matrix_entry,
     stamped_filename,
     write_compare_reports_csv,
     write_compare_reports_html,
+    write_keys_mismatch_matrix_csv,
     write_summary,
 )
 
@@ -212,6 +216,7 @@ def run(
     records_mismatched = 0
     per_segment_match: dict[str, int] = defaultdict(int)
     per_segment_mismatch: dict[str, int] = defaultdict(int)
+    key_matrix_entries: list[KeyMatrixEntry] = []
 
     with OutputWriter(output_dir, segments_a_cfg, filename_stamp=filename_stamp) as writer:
         _write_dups(file_a, dups_a, parser_a, segments_a_cfg, writer.write_dup_a)
@@ -231,6 +236,7 @@ def run(
                 else:
                     writer.write_mismatch(verdict, rec_a, rec_b)
                     records_mismatched += 1
+                    key_matrix_entries.append(build_key_matrix_entry(verdict))
 
                 for sv in verdict.segment_verdicts:
                     if sv.matched:
@@ -278,7 +284,16 @@ def run(
             engine_version=__version__,
             filename_stamp=filename_stamp,
         )
-        writer.finalize(summary)
+        writer.finalize(
+            CompareReports(
+                summary=summary,
+                layout_a=config.layout_a,
+                layout_b=config.layout_b,
+                key_matrix_entries=tuple(key_matrix_entries),
+                matrix_segments=config.known_segments,
+                output_dir=output_dir,
+            )
+        )
 
     logger.info(
         "comparison complete: %d matched, %d mismatched, %d elapsed=%.3fs",
@@ -413,10 +428,12 @@ def run_parallel(
         master_writer.path_for("matches.dat").unlink(missing_ok=True)
         master_writer.path_for("mismatches.dat").unlink(missing_ok=True)
         master_writer.path_for("report.csv").unlink(missing_ok=True)
-        # summary.json + compare_reports.* are written below, after the merge.
+        # summary.json + compare_reports.* + keys_mismatch_matrix.csv are
+        # written below, after the merge.
         master_writer.path_for("summary.json").unlink(missing_ok=True)
         master_writer.path_for("compare_reports.csv").unlink(missing_ok=True)
         master_writer.path_for("compare_reports.html").unlink(missing_ok=True)
+        master_writer.path_for("keys_mismatch_matrix.csv").unlink(missing_ok=True)
 
     # Build payloads and spawn workers.
     chunks = equal_count_partition(both_keys, workers)
@@ -486,14 +503,29 @@ def run_parallel(
         filename_stamp=filename_stamp,
     )
 
-    # Write summary.json + the two human reports (ADR-035), all under
-    # the run output dir, all stamped.
+    # Concatenate per-worker matrix entries in worker-id order so the
+    # final file mirrors the join's sorted-key order (ADR-036).
+    all_matrix_entries = tuple(entry for r in results for entry in r.key_matrix_entries)
+    reports = CompareReports(
+        summary=summary,
+        layout_a=config.layout_a,
+        layout_b=config.layout_b,
+        key_matrix_entries=all_matrix_entries,
+        matrix_segments=config.known_segments,
+        output_dir=output_dir,
+    )
+
+    # Write summary.json + the three human reports (ADR-035, ADR-036),
+    # all under the run output dir, all stamped.
     write_summary(summary, output_dir / stamped_filename("summary.json", filename_stamp))
     write_compare_reports_csv(
-        summary, output_dir / stamped_filename("compare_reports.csv", filename_stamp)
+        reports, output_dir / stamped_filename("compare_reports.csv", filename_stamp)
     )
     write_compare_reports_html(
-        summary, output_dir / stamped_filename("compare_reports.html", filename_stamp)
+        reports, output_dir / stamped_filename("compare_reports.html", filename_stamp)
+    )
+    write_keys_mismatch_matrix_csv(
+        reports, output_dir / stamped_filename("keys_mismatch_matrix.csv", filename_stamp)
     )
 
     # Optional: clean up the per-worker scratch dir. Leave it for now so

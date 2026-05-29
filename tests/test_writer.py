@@ -9,24 +9,31 @@ import pytest
 
 from segment_compare.comparator import RecordVerdict, SegmentVerdict
 from segment_compare.parser import Record, Segment, SegmentsConfig
+from segment_compare.layout import load_file_layout
 from segment_compare.writer import (
     COMPARE_REPORTS_CSV_FILE,
     COMPARE_REPORTS_HTML_FILE,
     DUPS_A_FILE,
     DUPS_B_FILE,
+    KEY_MATRIX_FILE,
     KEYMISMATCH_A_FILE,
     KEYMISMATCH_B_FILE,
     MATCHES_FILE,
     MISMATCHES_FILE,
     REPORT_FILE,
     SUMMARY_FILE,
+    CompareReports,
+    KeyMatrixEntry,
     OutputWriter,
     SegmentSummary,
     Summary,
     stamped_filename,
     write_compare_reports_csv,
     write_compare_reports_html,
+    write_keys_mismatch_matrix_csv,
 )
+
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 SEGMENTS_CFG = SegmentsConfig(
     key_segment="TU4R",
@@ -223,7 +230,7 @@ def test_finalize_writes_summary_json(tmp_path: Path) -> None:
     out = tmp_path / "out"
     summary = _summary(tmp_path)
     with OutputWriter(out, SEGMENTS_CFG) as w:
-        w.finalize(summary)
+        w.finalize(_reports(summary, out))
     data = json.loads((out / SUMMARY_FILE).read_text())
     assert data["file_a_record_count"] == 4
     assert data["records_matched"] == 2
@@ -238,7 +245,7 @@ def test_finalize_closes_handles(tmp_path: Path) -> None:
     out = tmp_path / "out"
     summary = _summary(tmp_path)
     w = OutputWriter(out, SEGMENTS_CFG)
-    w.finalize(summary)
+    w.finalize(_reports(summary, out))
     # After finalize, writing should fail because handles are closed.
     with pytest.raises(ValueError):
         w.write_match(_record("K1", b"AAAA"))
@@ -248,7 +255,7 @@ def test_summary_json_is_pretty_printed(tmp_path: Path) -> None:
     out = tmp_path / "out"
     summary = _summary(tmp_path)
     with OutputWriter(out, SEGMENTS_CFG) as w:
-        w.finalize(summary)
+        w.finalize(_reports(summary, out))
     text = (out / SUMMARY_FILE).read_text()
     # indent=2 + sort_keys → multi-line, keys in alpha order
     assert "\n" in text
@@ -288,7 +295,7 @@ def test_writer_with_stamp_writes_stamped_filenames(tmp_path: Path) -> None:
                 length=5,
             )
         )
-        w.finalize(_summary(tmp_path))
+        w.finalize(_reports(_summary(tmp_path), out))
 
     # Bare names must NOT exist; stamped names must exist.
     assert not (out / MATCHES_FILE).exists()
@@ -322,6 +329,23 @@ def test_writer_path_for_helps_callers_resolve_stamped_paths(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 # compare_reports.csv + compare_reports.html (ADR-035)
 # ---------------------------------------------------------------------------
+
+
+def _reports(
+    summary: Summary,
+    output_dir: Path,
+    key_matrix_entries: tuple[KeyMatrixEntry, ...] = (),
+    matrix_segments: tuple[str, ...] = ("TU4R", "NM01", "ENDS"),
+) -> CompareReports:
+    """Wrap a Summary into a CompareReports using the committed layouts."""
+    return CompareReports(
+        summary=summary,
+        layout_a=load_file_layout(CONFIG_DIR / "layout_file_A.json"),
+        layout_b=load_file_layout(CONFIG_DIR / "layout_file_B.json"),
+        key_matrix_entries=key_matrix_entries,
+        matrix_segments=matrix_segments,
+        output_dir=output_dir,
+    )
 
 
 def _multi_segment_summary(tmp_path: Path) -> Summary:
@@ -359,20 +383,45 @@ def _multi_segment_summary(tmp_path: Path) -> Summary:
     )
 
 
+def _sample_matrix_entries() -> tuple[KeyMatrixEntry, ...]:
+    return (
+        KeyMatrixEntry(
+            key="KEY000000003",
+            segment_status={"TU4R": "Y", "NM01": "N", "AD01": "Y", "ENDS": "Y"},
+            segment_count_diffs=(),
+        ),
+        KeyMatrixEntry(
+            key="KEY000000005",
+            segment_status={"TU4R": "Y", "TR01": "N", "ENDS": "Y"},
+            segment_count_diffs=("TR01",),
+        ),
+    )
+
+
 def test_compare_reports_csv_has_section_key_value_header(tmp_path: Path) -> None:
     path = tmp_path / "reports.csv"
-    write_compare_reports_csv(_multi_segment_summary(tmp_path), path)
+    summary = _multi_segment_summary(tmp_path)
+    write_compare_reports_csv(_reports(summary, tmp_path), path)
     first = path.read_text(encoding="utf-8").splitlines()[0]
     assert first == "section,key,value"
 
 
 def test_compare_reports_csv_covers_every_summary_section(tmp_path: Path) -> None:
     path = tmp_path / "reports.csv"
-    write_compare_reports_csv(_multi_segment_summary(tmp_path), path)
+    summary = _multi_segment_summary(tmp_path)
+    write_compare_reports_csv(_reports(summary, tmp_path), path)
     text = path.read_text(encoding="utf-8")
 
-    # Every documented section must appear.
-    for section in ("run", "inputs", "counts", "per_segment", "timing", "config_paths"):
+    # Every documented section must appear (output_files is new in ADR-036).
+    for section in (
+        "run",
+        "inputs",
+        "counts",
+        "per_segment",
+        "output_files",
+        "timing",
+        "config_paths",
+    ):
         assert f"\n{section}," in "\n" + text, f"missing section: {section}"
 
     # Key scalars are pinned with full row content.
@@ -388,6 +437,12 @@ def test_compare_reports_csv_covers_every_summary_section(tmp_path: Path) -> Non
         for stat in ("match_count", "mismatch_count", "total_in_a", "total_in_b"):
             assert f"per_segment,{seg}.{stat}," in text, f"missing per_segment row {seg}.{stat}"
 
+    # New ADR-036 rows: every count metric paired with its stamped output file.
+    assert "output_files,records_matched,matches_202605280100.dat\n" in text
+    assert "output_files,records_mismatched,mismatches_202605280100.dat\n" in text
+    assert "output_files,dups_in_a,dups_A_202605280100.dat\n" in text
+    assert "output_files,keys_mismatch_matrix,keys_mismatch_matrix_202605280100.csv\n" in text
+
     # Config-paths rows preserve the known layout_a / layout_b / runtime order.
     rows = text.splitlines()
     cp_rows = [r for r in rows if r.startswith("config_paths,")]
@@ -399,43 +454,106 @@ def test_compare_reports_csv_covers_every_summary_section(tmp_path: Path) -> Non
 
 
 def test_compare_reports_csv_round_trips_via_csv_module(tmp_path: Path) -> None:
-    """The file must parse back via csv.reader without errors and yield the expected row count."""
+    """The file must parse back via csv.reader and yield the expected row count."""
     import csv
 
     path = tmp_path / "reports.csv"
-    write_compare_reports_csv(_multi_segment_summary(tmp_path), path)
+    summary = _multi_segment_summary(tmp_path)
+    write_compare_reports_csv(_reports(summary, tmp_path), path)
     with path.open("r", encoding="utf-8", newline="") as fh:
         rows = list(csv.reader(fh))
     header, *body = rows
     assert header == ["section", "key", "value"]
-    # 3 run rows + 6 input rows + 7 count rows + 8 per-segment rows (2 segs × 4 stats)
-    # + 4 timing rows + 3 config-path rows = 31
-    assert len(body) == 31
+    # 3 run + 6 inputs + 7 counts + 8 per_segment + 9 output_files
+    # (6 metric→file + report + summary + key_matrix) + 4 timing + 3 config_paths = 40
+    assert len(body) == 40
 
 
 def test_compare_reports_html_is_self_contained_and_well_formed(tmp_path: Path) -> None:
     path = tmp_path / "reports.html"
-    write_compare_reports_html(_multi_segment_summary(tmp_path), path)
+    summary = _multi_segment_summary(tmp_path)
+    write_compare_reports_html(_reports(summary, tmp_path), path)
     text = path.read_text(encoding="utf-8")
     assert text.startswith("<!DOCTYPE html>")
     assert "</html>" in text
     # No external CSS or JS — everything must be inline.
     assert "<link " not in text
     assert "<script" not in text
-    # Section headings present.
+    # Section headings present (Layouts and Per-key mismatch sample are new).
     for heading in (
+        "Layouts",
         "Inputs",
         "Aggregate counts",
         "Per-segment breakdown",
+        "Per-key mismatch sample",
         "Timing",
         "Config provenance",
     ):
         assert heading in text, f"missing heading: {heading}"
 
 
+def test_compare_reports_html_layouts_section_is_side_by_side(tmp_path: Path) -> None:
+    """The Layouts section should render File A and File B in two flex columns."""
+    path = tmp_path / "reports.html"
+    summary = _multi_segment_summary(tmp_path)
+    write_compare_reports_html(_reports(summary, tmp_path), path)
+    text = path.read_text(encoding="utf-8")
+    # Side-by-side container present.
+    assert 'class="sxs"' in text
+    # Both layouts addressed by name.
+    assert "File A — overview" in text
+    assert "File B — overview" in text
+    # Committed layouts both target TU4R as the key segment and ENDS as end.
+    assert text.count("TU4R") >= 4  # appears in each layout meta + segments table
+    assert text.count("ENDS") >= 4
+
+
+def test_compare_reports_html_aggregate_counts_link_to_output_files(tmp_path: Path) -> None:
+    """Each count metric's row must include a clickable link to its stamped output file."""
+    path = tmp_path / "reports.html"
+    summary = _multi_segment_summary(tmp_path)
+    write_compare_reports_html(_reports(summary, tmp_path), path)
+    text = path.read_text(encoding="utf-8")
+    for fragment in (
+        "matches_202605280100.dat",
+        "mismatches_202605280100.dat",
+        "keymismatch_A_202605280100.dat",
+        "keymismatch_B_202605280100.dat",
+        "dups_A_202605280100.dat",
+        "dups_B_202605280100.dat",
+    ):
+        assert f"href='{fragment}'" in text, f"missing link to {fragment}"
+
+
+def test_compare_reports_html_per_key_sample_renders_and_links_to_full_matrix(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "reports.html"
+    summary = _multi_segment_summary(tmp_path)
+    reports = _reports(
+        summary,
+        tmp_path,
+        key_matrix_entries=_sample_matrix_entries(),
+        matrix_segments=("TU4R", "NM01", "AD01", "TR01", "ENDS"),
+    )
+    write_compare_reports_html(reports, path)
+    text = path.read_text(encoding="utf-8")
+    # Both sample keys present.
+    assert "KEY000000003" in text
+    assert "KEY000000005" in text
+    # Y/N cells render with their CSS classes.
+    assert "class='y'>Y<" in text
+    assert "class='n'>N<" in text
+    # segment_count_mismatch pipe-delimited entry.
+    assert ">TR01<" in text
+    # Sample notes references the full file with stamped name.
+    assert "keys_mismatch_matrix_202605280100.csv" in text
+
+
 def test_compare_reports_html_renders_metric_values(tmp_path: Path) -> None:
     path = tmp_path / "reports.html"
-    write_compare_reports_html(_multi_segment_summary(tmp_path), path)
+    summary = _multi_segment_summary(tmp_path)
+    write_compare_reports_html(_reports(summary, tmp_path), path)
     text = path.read_text(encoding="utf-8")
     # Aggregate counts surface as thousand-separated cell contents.
     assert ">2<" in text  # records_matched
@@ -453,25 +571,63 @@ def test_compare_reports_html_escapes_dangerous_characters(tmp_path: Path) -> No
     """Path-like strings must be HTML-escaped so they cannot break the markup."""
     from dataclasses import replace
 
-    s = replace(
+    summary = replace(
         _multi_segment_summary(tmp_path),
         config_paths={"layout_a": "/cfg/<script>alert(1)</script>"},
     )
     path = tmp_path / "reports.html"
-    write_compare_reports_html(s, path)
+    write_compare_reports_html(_reports(summary, tmp_path), path)
     text = path.read_text(encoding="utf-8")
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
     assert "<script>alert(1)</script>" not in text
 
 
-def test_outputwriter_finalize_emits_csv_and_html_alongside_summary_json(
-    tmp_path: Path,
-) -> None:
-    """finalize must produce summary.json + compare_reports.csv + compare_reports.html."""
+def test_outputwriter_finalize_emits_all_four_report_files(tmp_path: Path) -> None:
+    """finalize must produce summary.json + compare_reports.csv + compare_reports.html + matrix."""
     out = tmp_path / "out"
     stamp = "202605280100"
+    summary = _multi_segment_summary(tmp_path)
     with OutputWriter(out, SEGMENTS_CFG, filename_stamp=stamp) as w:
-        w.finalize(_multi_segment_summary(tmp_path))
+        w.finalize(_reports(summary, out))
     assert (out / stamped_filename(SUMMARY_FILE, stamp)).exists()
     assert (out / stamped_filename(COMPARE_REPORTS_CSV_FILE, stamp)).exists()
     assert (out / stamped_filename(COMPARE_REPORTS_HTML_FILE, stamp)).exists()
+    assert (out / stamped_filename(KEY_MATRIX_FILE, stamp)).exists()
+
+
+# ---------------------------------------------------------------------------
+# keys_mismatch_matrix.csv (ADR-036)
+# ---------------------------------------------------------------------------
+
+
+def test_keys_mismatch_matrix_has_expected_header(tmp_path: Path) -> None:
+    summary = _multi_segment_summary(tmp_path)
+    reports = _reports(summary, tmp_path, matrix_segments=("TU4R", "NM01", "ENDS"))
+    path = tmp_path / "matrix.csv"
+    write_keys_mismatch_matrix_csv(reports, path)
+    header = path.read_text(encoding="utf-8").splitlines()[0]
+    assert header == "key,TU4R,NM01,ENDS,segment_count_mismatch"
+
+
+def test_keys_mismatch_matrix_renders_each_entry(tmp_path: Path) -> None:
+    summary = _multi_segment_summary(tmp_path)
+    reports = _reports(
+        summary,
+        tmp_path,
+        key_matrix_entries=_sample_matrix_entries(),
+        matrix_segments=("TU4R", "NM01", "AD01", "TR01", "ENDS"),
+    )
+    path = tmp_path / "matrix.csv"
+    write_keys_mismatch_matrix_csv(reports, path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[1] == "KEY000000003,Y,N,Y,,Y,"
+    assert lines[2] == "KEY000000005,Y,,,N,Y,TR01"
+
+
+def test_keys_mismatch_matrix_empty_when_no_mismatches(tmp_path: Path) -> None:
+    summary = _multi_segment_summary(tmp_path)
+    reports = _reports(summary, tmp_path)
+    path = tmp_path / "matrix.csv"
+    write_keys_mismatch_matrix_csv(reports, path)
+    # Only the header row.
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
