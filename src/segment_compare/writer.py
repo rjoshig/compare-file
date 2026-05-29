@@ -643,6 +643,7 @@ def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
   .sample-note {{ color: #666; font-size: 0.85em; margin-top: 0.5em; }}
   a.fileref {{ color: #1a5bb8; text-decoration: none; }}
   a.fileref:hover {{ text-decoration: underline; }}
+  .hint {{ cursor: help; border-bottom: 1px dotted #aaa; }}
 </style>
 </head>
 <body>
@@ -854,15 +855,14 @@ def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
         return f"<a class='fileref' href='{e(href)}'>{e(href)}</a>"
 
     rows_html = "".join(
-        f"<tr><td class='{css}'>{label}</td>"
-        f"<td>{e(desc)}</td>"
+        f"<tr><td class='{css} hint' title='{e(desc)}'>{label}</td>"
         f"<td class='num'>{val:,}</td>"
         f"<td>{_file_cell(metric_key)}</td></tr>"
         for label, desc, val, css, metric_key in rows
     )
     return (
         "<table>"
-        "<tr><th>Metric</th><th>Description</th><th class='num'>Value</th><th>File</th></tr>"
+        "<tr><th>Metric</th><th class='num'>Value</th><th>File</th></tr>"
         f"{rows_html}"
         "</table>"
     )

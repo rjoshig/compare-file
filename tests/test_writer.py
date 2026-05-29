@@ -508,21 +508,25 @@ def test_compare_reports_html_layouts_section_is_side_by_side(tmp_path: Path) ->
     assert text.count("ENDS") >= 4
 
 
-def test_compare_reports_html_aggregate_counts_has_description_column(tmp_path: Path) -> None:
-    """Each count row carries a short description explaining the metric."""
+def test_compare_reports_html_aggregate_counts_descriptions_are_tooltips(
+    tmp_path: Path,
+) -> None:
+    """Each metric label carries its description as a hover tooltip (title attr)."""
     path = tmp_path / "reports.html"
     summary = _multi_segment_summary(tmp_path)
     write_compare_reports_html(_reports(summary, tmp_path), path)
     text = path.read_text(encoding="utf-8")
-    # Column header present.
-    assert "<th>Description</th>" in text
-    # A few sample descriptions appear verbatim.
-    assert "Records found in both files with identical content." in text
-    assert "Records found only in File A, not in File B." in text
-    assert "the same key appears more" in text
-    # No jargon leak: "hash" / "multiset" / "inner-join" should not appear in
-    # the operator-facing descriptions.
+
     aggregate_section = text.split("<h2>Aggregate counts</h2>")[1].split("</table>")[0]
+    # No separate Description column header.
+    assert "<th>Description</th>" not in aggregate_section
+    # Descriptions ride as title= attributes on the metric cells.
+    assert "title='Records found in both files with identical content.'" in aggregate_section
+    assert "title='Records found only in File A, not in File B.'" in aggregate_section
+    # The hoverable cells carry the hint class so the dotted underline +
+    # help cursor signal "hover me" to readers.
+    assert "hint" in aggregate_section
+    # No jargon leak in tooltip text.
     for jargon in ("hash", "multiset", "inner-join", "ADR-019"):
         assert (
             jargon not in aggregate_section
