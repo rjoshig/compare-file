@@ -1,0 +1,140 @@
+/* Global app styles. PrimeVue's Material preset handles the
+   component visuals; this file owns the dashboard frame, the
+   custom surface tokens that follow dark mode, and the typography
+   scale. */
+
+/* ---------- Light theme (Material 3 inspired) ---------- */
+:root {
+  /* Surfaces */
+  --surface-page: #f7f8fb;
+  --surface-1: #ffffff;       /* card, panel */
+  --surface-2: #f3f4f8;       /* hover / subtle */
+  --surface-3: #e9ebf2;       /* drawer / inset */
+  --surface-sticky: rgba(255, 255, 255, 0.94);
+  --surface-border: #e3e5ea;
+  --surface-divider: #ebedf0;
+
+  /* Text */
+  --text-strong: #1c1f24;
+  --text-body: #2d3138;
+  --text-muted: #5b626d;
+  --text-disabled: #9aa1ac;
+
+  /* Status (kept consistent across themes) */
+  --status-match: #16a34a;
+  --status-mismatch: #dc2626;
+  --status-warn: #d97706;
+  --status-info: #2563eb;
+
+  /* Tones for A / B */
+  --tone-a: #2563eb;
+  --tone-a-soft: rgba(37, 99, 235, 0.10);
+  --tone-b: #f59e0b;
+  --tone-b-soft: rgba(245, 158, 11, 0.12);
+
+  /* Elevation (Material 3) */
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --elev-2: 0 2px 4px rgba(0, 0, 0, 0.08), 0 4px 8px rgba(0, 0, 0, 0.05);
+  --elev-3: 0 4px 8px rgba(0, 0, 0, 0.10), 0 8px 16px rgba(0, 0, 0, 0.06);
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+}
+
+/* ---------- Dark theme ---------- */
+html.dark {
+  /* Surfaces — Material 3 dark surface palette with elevation overlays
+     baked in (12% white on each step). */
+  --surface-page: #0f1117;
+  --surface-1: #181b22;
+  --surface-2: #1e222b;
+  --surface-3: #232733;
+  --surface-sticky: rgba(24, 27, 34, 0.94);
+  --surface-border: #2b303d;
+  --surface-divider: #262a35;
+
+  --text-strong: #e8ebf2;
+  --text-body: #d2d6e0;
+  --text-muted: #9098a8;
+  --text-disabled: #5b626d;
+
+  --status-match: #22c55e;
+  --status-mismatch: #ef4444;
+  --status-warn: #f59e0b;
+  --status-info: #60a5fa;
+
+  --tone-a: #60a5fa;
+  --tone-a-soft: rgba(96, 165, 250, 0.16);
+  --tone-b: #fbbf24;
+  --tone-b-soft: rgba(251, 191, 36, 0.16);
+
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.20);
+  --elev-2: 0 2px 4px rgba(0, 0, 0, 0.40), 0 4px 8px rgba(0, 0, 0, 0.25);
+  --elev-3: 0 4px 8px rgba(0, 0, 0, 0.50), 0 8px 16px rgba(0, 0, 0, 0.35);
+
+  color-scheme: dark;
+}
+
+/* ---------- Reset + base ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #app { margin: 0; padding: 0; min-height: 100vh; }
+body {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+               Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  background: var(--surface-page);
+  color: var(--text-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------- Typography scale (Material 3 inspired) ---------- */
+.t-display { font-size: 2rem;   font-weight: 600; letter-spacing: -0.01em; line-height: 1.2; }
+.t-headline { font-size: 1.4rem;  font-weight: 600; letter-spacing: -0.005em; line-height: 1.25; }
+.t-title    { font-size: 1.0rem;  font-weight: 600; line-height: 1.4; }
+.t-body     { font-size: 0.92rem; font-weight: 400; line-height: 1.5; }
+.t-body-strong { font-size: 0.92rem; font-weight: 500; line-height: 1.5; }
+.t-label    { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.06em;
+              text-transform: uppercase; color: var(--text-muted); }
+.t-small    { font-size: 0.8rem;  font-weight: 400; line-height: 1.5; color: var(--text-muted); }
+.t-mono     { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo,
+              Consolas, monospace; font-size: 0.86em; }
+
+/* ---------- Utilities ---------- */
+.muted { color: var(--text-muted); }
+.code { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+        font-size: 0.86em; }
+.stack-xs > * + * { margin-top: 0.35rem; }
+.stack-sm > * + * { margin-top: 0.6rem; }
+.stack-md > * + * { margin-top: 1rem; }
+.stack-lg > * + * { margin-top: 1.5rem; }
+
+/* Material Symbols base */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  font-size: 20px;
+  vertical-align: middle;
+}
+
+/* ---------- PrimeVue overrides for a tighter Material look ---------- */
+/* Slightly more rounded buttons, consistent with M3. */
+.p-button { border-radius: 8px !important; font-weight: 500 !important; }
+.p-panel .p-panel-header { border-radius: var(--radius-md) var(--radius-md) 0 0; }
+.p-panel { border-radius: var(--radius-md); overflow: hidden; }
+.p-card { border-radius: var(--radius-md); box-shadow: var(--elev-1); }
+
+/* Make Material input fields play well with our surface tokens. */
+.p-inputtext,
+.p-inputnumber-input,
+.p-select { border-radius: var(--radius-sm) !important; }
+
+/* Toast: a touch more contrast in dark mode */
+html.dark .p-toast-message { box-shadow: var(--elev-2); }
+
+/* Scrollbars in dark mode */
+html.dark ::-webkit-scrollbar { width: 10px; height: 10px; }
+html.dark ::-webkit-scrollbar-track { background: var(--surface-page); }
+html.dark ::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 6px; }
+html.dark ::-webkit-scrollbar-thumb:hover { background: #353a47; }
