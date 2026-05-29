@@ -51,18 +51,30 @@ from segment_compare.parser import (
 from segment_compare.partitioner import equal_count_partition
 from segment_compare.worker import WorkerPayload, WorkerResult, run_worker
 from segment_compare.writer import (
+    DUPS_A_COUNT_FILE,
+    DUPS_B_COUNT_FILE,
+    DUPS_SAMPLE_SIZE,
+    MATCH_SAMPLE_SIZE,
     MATCHES_FILE,
     MATCHES_SAMPLE_SIZE,
+    MISMATCH_SAMPLE_SIZE,
+    MISMATCHES_FILE,
+    ORPHANS_SAMPLE_SIZE,
     RUN_DIR_FORMAT,
     STAMP_FORMAT,
     CompareReports,
+    DupCount,
     KeyMatrixEntry,
+    MismatchSample,
     OutputWriter,
+    RecordSample,
+    RunSamples,
     SegmentSummary,
     Summary,
     build_key_matrix_entry,
     write_compare_reports_csv,
     write_compare_reports_html,
+    write_dups_count_report,
     write_keys_mismatch_matrix_csv,
     write_summary,
 )
@@ -222,6 +234,8 @@ def run(
     per_segment_match: dict[str, int] = defaultdict(int)
     per_segment_mismatch: dict[str, int] = defaultdict(int)
     key_matrix_entries: list[KeyMatrixEntry] = []
+    match_samples: list[RecordSample] = []
+    mismatch_samples: list[MismatchSample] = []
 
     # Per-run subdir (ADR-037): all 11 outputs land inside run_output_dir
     # with bare filenames since the dir name already disambiguates runs.
@@ -242,9 +256,15 @@ def run(
                     # records_matched counter still reflects every match.
                     if records_matched < MATCHES_SAMPLE_SIZE:
                         writer.write_match(rec_a)
+                    if len(match_samples) < MATCH_SAMPLE_SIZE:
+                        match_samples.append(RecordSample(key, _decode_raw(rec_a.raw)))
                     records_matched += 1
                 else:
                     writer.write_mismatch(verdict, rec_a, rec_b)
+                    if len(mismatch_samples) < MISMATCH_SAMPLE_SIZE:
+                        mismatch_samples.append(
+                            MismatchSample(key, _decode_raw(rec_a.raw), _decode_raw(rec_b.raw))
+                        )
                     records_mismatched += 1
                     key_matrix_entries.append(build_key_matrix_entry(verdict))
 
@@ -294,6 +314,10 @@ def run(
             engine_version=__version__,
             filename_stamp=run_dir_name,
         )
+        dups_a_s, dups_b_s, orphans_a_s, orphans_b_s = _dup_orphan_samples(
+            dups_a, dups_b, only_a_keys, only_b_keys
+        )
+        _write_dup_count_reports(dups_a, dups_b, run_output_dir)
         writer.finalize(
             CompareReports(
                 summary=summary,
@@ -302,6 +326,14 @@ def run(
                 key_matrix_entries=tuple(key_matrix_entries),
                 matrix_segments=config.known_segments,
                 output_dir=run_output_dir,
+                samples=RunSamples(
+                    matches=tuple(match_samples),
+                    mismatches=tuple(mismatch_samples),
+                    dups_a=dups_a_s,
+                    dups_b=dups_b_s,
+                    orphans_a=orphans_a_s,
+                    orphans_b=orphans_b_s,
+                ),
             )
         )
 
@@ -529,6 +561,24 @@ def run_parallel(
     # Concatenate per-worker matrix entries in worker-id order so the
     # final file mirrors the join's sorted-key order (ADR-036).
     all_matrix_entries = tuple(entry for r in results for entry in r.key_matrix_entries)
+
+    # Report samples (ADR-040). dups/orphans come from master memory; match/
+    # mismatch are read back from the merged files (workers wrote them, the
+    # master has no in-memory copy). The merged files are complete + closed by
+    # now, so the read-back is safe in both the inline and pooled worker modes.
+    dups_a_s, dups_b_s, orphans_a_s, orphans_b_s = _dup_orphan_samples(
+        dups_a, dups_b, only_a_keys, only_b_keys
+    )
+    samples = RunSamples(
+        matches=_read_match_samples(
+            run_output_dir / MATCHES_FILE, parser_a, segments_a_cfg, MATCH_SAMPLE_SIZE
+        ),
+        mismatches=_parse_mismatch_samples(run_output_dir / MISMATCHES_FILE, MISMATCH_SAMPLE_SIZE),
+        dups_a=dups_a_s,
+        dups_b=dups_b_s,
+        orphans_a=orphans_a_s,
+        orphans_b=orphans_b_s,
+    )
     reports = CompareReports(
         summary=summary,
         layout_a=config.layout_a,
@@ -536,6 +586,7 @@ def run_parallel(
         key_matrix_entries=all_matrix_entries,
         matrix_segments=config.known_segments,
         output_dir=run_output_dir,
+        samples=samples,
     )
 
     # Write summary.json + the three human reports (ADR-035, ADR-036,
@@ -544,6 +595,7 @@ def run_parallel(
     write_compare_reports_csv(reports, run_output_dir / "compare_reports.csv")
     write_compare_reports_html(reports, run_output_dir / "compare_reports.html")
     write_keys_mismatch_matrix_csv(reports, run_output_dir / "keys_mismatch_matrix.csv")
+    _write_dup_count_reports(dups_a, dups_b, run_output_dir)
 
     # Optional: clean up the per-worker scratch dir. Leave it for now so
     # debugging is easier; a future ADR can flip this once the path is
@@ -692,6 +744,85 @@ def _read_record_at(
     if not parsed:
         raise InputFileError(f"no record could be parsed at offset {offset} (length {length})")
     return _apply_aliases(parsed[0], aliases)
+
+
+def _decode_raw(raw: bytes) -> str:
+    """Decode a record's raw bytes for display in the HTML report (ADR-040)."""
+    return raw.decode("ascii", errors="replace").rstrip("\n")
+
+
+def _dup_orphan_samples(
+    dups_a: dict[str, list[tuple[int, int]]],
+    dups_b: dict[str, list[tuple[int, int]]],
+    only_a_keys: list[str],
+    only_b_keys: list[str],
+) -> tuple[tuple[DupCount, ...], tuple[DupCount, ...], tuple[str, ...], tuple[str, ...]]:
+    """Build the dup-count + orphan-key samples (same in both pipeline paths)."""
+    dca = tuple(DupCount(k, len(dups_a[k])) for k in sorted(dups_a)[:DUPS_SAMPLE_SIZE])
+    dcb = tuple(DupCount(k, len(dups_b[k])) for k in sorted(dups_b)[:DUPS_SAMPLE_SIZE])
+    return (
+        dca,
+        dcb,
+        tuple(only_a_keys[:ORPHANS_SAMPLE_SIZE]),
+        tuple(only_b_keys[:ORPHANS_SAMPLE_SIZE]),
+    )
+
+
+def _write_dup_count_reports(
+    dups_a: dict[str, list[tuple[int, int]]],
+    dups_b: dict[str, list[tuple[int, int]]],
+    run_output_dir: Path,
+) -> None:
+    """Write the full per-key dup-count CSVs for both files (ADR-040)."""
+    write_dups_count_report(
+        {k: len(v) for k, v in dups_a.items()}, run_output_dir / DUPS_A_COUNT_FILE
+    )
+    write_dups_count_report(
+        {k: len(v) for k, v in dups_b.items()}, run_output_dir / DUPS_B_COUNT_FILE
+    )
+
+
+def _read_match_samples(
+    path: Path, parser_cfg: ParserConfig, segments_cfg: SegmentsConfig, limit: int
+) -> tuple[RecordSample, ...]:
+    """Read up to ``limit`` matched records back from the merged matches.dat."""
+    if not path.exists():
+        return ()
+    out: list[RecordSample] = []
+    with path.open("rb") as fh:
+        for rec in iter_records(fh, parser_cfg, segments_cfg):
+            out.append(RecordSample(rec.key, _decode_raw(rec.raw)))
+            if len(out) >= limit:
+                break
+    return tuple(out)
+
+
+def _parse_mismatch_samples(path: Path, limit: int) -> tuple[MismatchSample, ...]:
+    """Parse up to ``limit`` side-by-side blocks back from the merged mismatches.dat.
+
+    Blocks are written by :meth:`OutputWriter.write_mismatch` as::
+
+        === KEY: <key> | MISMATCH: <segs> ===
+        --- FILE A ---
+        <raw bytes>
+        --- FILE B ---
+        <raw bytes>
+    """
+    if not path.exists():
+        return ()
+    text = path.read_text(encoding="ascii", errors="replace")
+    out: list[MismatchSample] = []
+    for block in text.split("=== KEY: ")[1:]:
+        if len(out) >= limit:
+            break
+        header, _, rest = block.partition("\n")
+        key = header.split(" | ", 1)[0].strip()
+        if "--- FILE A ---\n" not in rest or "--- FILE B ---\n" not in rest:
+            continue
+        _, _, after_a = rest.partition("--- FILE A ---\n")
+        a_part, _, after_b = after_a.partition("--- FILE B ---\n")
+        out.append(MismatchSample(key, a_part.strip("\n"), after_b.strip("\n")))
+    return tuple(out)
 
 
 def _write_dups(

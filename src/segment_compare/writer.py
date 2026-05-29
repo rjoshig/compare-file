@@ -57,6 +57,11 @@ SUMMARY_FILE = "summary.json"
 COMPARE_REPORTS_CSV_FILE = "compare_reports.csv"
 COMPARE_REPORTS_HTML_FILE = "compare_reports.html"
 KEY_MATRIX_FILE = "keys_mismatch_matrix.csv"
+# Per-key duplicate-count reports (ADR-040): one row per duplicate key with
+# its occurrence count in that file. The full set (not a sample), linked from
+# the HTML report's "Sample records" dups subsection.
+DUPS_A_COUNT_FILE = "dups_A_count_report.csv"
+DUPS_B_COUNT_FILE = "dups_B_count_report.csv"
 
 # Maps each aggregate-count metric to the output file where the
 # corresponding records can be found. Used by the HTML report to
@@ -83,6 +88,14 @@ RUN_DIR_FORMAT = "report-%Y-%m-%d-%H-%M-%S"
 # the true number of matched records; only the on-disk *.dat content is
 # truncated. mismatches.dat is unaffected — it keeps the full set.
 MATCHES_SAMPLE_SIZE = 10
+
+# Caps for the "Sample records" section embedded in compare_reports.html
+# (ADR-040). These bound how many example rows the report shows per
+# category; the aggregate counts in summary.json remain the truth.
+MATCH_SAMPLE_SIZE = 5
+MISMATCH_SAMPLE_SIZE = 10
+DUPS_SAMPLE_SIZE = 10
+ORPHANS_SAMPLE_SIZE = 10
 
 
 def stamped_filename(base: str, stamp: str) -> str:
@@ -207,6 +220,47 @@ class Summary:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordSample:
+    """One sampled record for the report: its key and decoded raw bytes."""
+
+    key: str
+    data: str
+
+
+@dataclass(frozen=True, slots=True)
+class MismatchSample:
+    """One sampled mismatched key with both sides' decoded raw records."""
+
+    key: str
+    a: str
+    b: str
+
+
+@dataclass(frozen=True, slots=True)
+class DupCount:
+    """One duplicate key and how many times it occurred in that file."""
+
+    key: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RunSamples:
+    """Capped example rows for the report's "Sample records" section (ADR-040).
+
+    All fields are bounded by the ``*_SAMPLE_SIZE`` constants; they are
+    illustrative only and never the source of truth for any count.
+    """
+
+    matches: tuple[RecordSample, ...] = ()
+    mismatches: tuple[MismatchSample, ...] = ()
+    dups_a: tuple[DupCount, ...] = ()
+    dups_b: tuple[DupCount, ...] = ()
+    orphans_a: tuple[str, ...] = ()
+    orphans_b: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CompareReports:
     """Bundle of everything the report-writing functions need (ADR-036).
 
@@ -224,6 +278,9 @@ class CompareReports:
         output_dir: Resolved run output directory. The HTML's clickable
             file links resolve relative to this so the HTML works when
             opened directly from disk.
+        samples: Capped example rows (matches / mismatches / dups /
+            orphans) for the HTML report's "Sample records" section
+            (ADR-040). Defaults to empty.
     """
 
     summary: Summary
@@ -232,6 +289,7 @@ class CompareReports:
     key_matrix_entries: tuple[KeyMatrixEntry, ...]
     matrix_segments: tuple[str, ...]
     output_dir: Path
+    samples: RunSamples = RunSamples()
 
 
 class OutputWriter:
@@ -458,6 +516,21 @@ def write_summary(summary: Summary, path: Path) -> None:
         fh.write("\n")
 
 
+def write_dups_count_report(dup_counts: dict[str, int], path: Path) -> None:
+    """Write a per-key duplicate-count CSV (``key,count``) for one file (ADR-040).
+
+    ``dup_counts`` maps each duplicate key to how many times it occurred in
+    that source file. Rows are sorted by key for deterministic diffs. The
+    header is always written, so the file exists (and the HTML link resolves)
+    even when there are no duplicates.
+    """
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(("key", "count"))
+        for key in sorted(dup_counts):
+            w.writerow((key, dup_counts[key]))
+
+
 # ---------------------------------------------------------------------------
 # Human reports (ADR-035 / ADR-036) — CSV + HTML alongside summary.json
 # ---------------------------------------------------------------------------
@@ -593,6 +666,7 @@ def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
     matrix_sample_html = _render_key_matrix_sample(
         reports.key_matrix_entries, reports.matrix_segments, stamp, e
     )
+    samples_html = _render_samples(reports.samples, e)
     timing_html = _render_timing(summary, e)
     config_paths_html = _render_config_paths(summary, e)
 
@@ -886,6 +960,20 @@ def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
   }}
   .blank {{ color: var(--text-muted); opacity: 0.4; text-align: center; }}
   .sample-note {{ color: var(--text-muted); font-size: 0.85rem; margin-top: 0.6rem; }}
+  /* Raw copy-pasteable record block: one record per line, no wrap (ADR-042). */
+  .sample-block {{
+    margin: 0.4rem 0;
+    padding: 0.6rem 0.7rem;
+    background: var(--surface-2);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-sm);
+    font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    white-space: pre;
+    overflow-x: auto;
+    tab-size: 4;
+  }}
 
   /* File-link styling */
   a.fileref {{
@@ -959,10 +1047,13 @@ def write_compare_reports_html(reports: CompareReports, path: Path) -> None:
 <h2>Per-key mismatch sample</h2>
 <div class="card">{matrix_sample_html}</div>
 
+<h2>Sample records</h2>
+<div class="card">{samples_html}</div>
+
 <h2>Timing</h2>
 <div class="card">{timing_html}</div>
 
-<h2>Config provenance</h2>
+<h2>Run configs</h2>
 <div class="card">{config_paths_html}</div>
 
 </main>
@@ -998,17 +1089,10 @@ def _render_one_layout(title: str, layout: "FileLayout", e: "Any") -> str:
         if layout.strip_leading_bytes is not None
         else "none"
     )
-    aliases_desc = (
-        ", ".join(
-            f"{e(a.wire_name)}→{e(a.logical_name)} after {e(a.after_segment)}"
-            for a in layout.segment_aliases
-        )
-        or "none"
-    )
-
+    # Segment aliases (ADR-034) are intentionally NOT surfaced in the report —
+    # they're an internal backend concern (ADR-040).
     meta_html = (
         '<dl class="meta">'
-        f"<dt>Layout file</dt><dd class='code'>{e(layout.source_path.name)}</dd>"
         f"<dt>Key segment</dt><dd class='code'>{e(key_seg.name)}</dd>"
         f"<dt>Key field</dt><dd class='code'>{e(key_field.name)}</dd>"
         f"<dt>Key range</dt><dd class='code'>[{key_range[0]}, {key_range[1]})"
@@ -1017,7 +1101,6 @@ def _render_one_layout(title: str, layout: "FileLayout", e: "Any") -> str:
         f"<dt>Record delim</dt><dd class='code'>{e(repr(ff.record_delimiter))}</dd>"
         f"<dt>Strip prefix</dt><dd>{strip_desc}</dd>"
         f"<dt>RDW</dt><dd>{rdw_desc}</dd>"
-        f"<dt>Aliases</dt><dd>{aliases_desc}</dd>"
         f"<dt>Sort</dt><dd>input_sorted={layout.sort.input_sorted}, "
         f"order={e(layout.sort.order)}, key_type={e(layout.sort.key_type)}</dd>"
         "</dl>"
@@ -1257,6 +1340,79 @@ def _render_key_matrix_sample(
         f"{body}"
         "</table>"
         f"{note}"
+    )
+
+
+def _render_samples(samples: "RunSamples", e: "Any") -> str:
+    """Render the "Sample records" section (ADR-040): capped examples per category.
+
+    Matched / mismatched records render as raw monospace code blocks — one
+    record per line, no wrapping (horizontal scroll) — so the operator can
+    select and paste them straight into a text editor to eyeball differences
+    (ADR-042). Each ``<pre>`` line is a full record on a single line.
+    """
+    if samples.matches:
+        lines = "\n".join(f"{e(m.key)}  {e(m.data)}" for m in samples.matches)
+        matches_html = (
+            f"<pre class='sample-block'>{lines}</pre>"
+            f"<p class='sample-note'>Up to {MATCH_SAMPLE_SIZE} matched records, one per line "
+            f"(File A shown; File B is identical after normalization). Select &amp; copy.</p>"
+        )
+    else:
+        matches_html = "<p class='sample-note'>No matched records.</p>"
+
+    if samples.mismatches:
+        # Two lines per key: File A then File B, so a copied pair diffs cleanly.
+        pairs = []
+        for m in samples.mismatches:
+            pairs.append(f"{e(m.key)} | A | {e(m.a)}")
+            pairs.append(f"{e(m.key)} | B | {e(m.b)}")
+        lines = "\n".join(pairs)
+        link = f"<a class='fileref' href='{e(MISMATCHES_FILE)}'>{e(MISMATCHES_FILE)}</a>"
+        mismatches_html = (
+            f"<pre class='sample-block'>{lines}</pre>"
+            f"<p class='sample-note'>First {len(samples.mismatches)} mismatched records — "
+            f"File A then File B per key, one record per line; copy the two lines to diff. "
+            f"Full diagnostics: {link}</p>"
+        )
+    else:
+        mismatches_html = "<p class='sample-note'>No mismatched records.</p>"
+
+    def dup_table(dups: tuple[DupCount, ...], fileref: str, count_ref: str) -> str:
+        count_link = f"<a class='fileref' href='{e(count_ref)}'>{e(count_ref)}</a>"
+        if not dups:
+            return f"<p class='sample-note'>No duplicate keys. Per-key counts: {count_link}</p>"
+        rows = "".join(
+            f"<tr><td class='code'>{e(d.key)}</td><td class='num'>{d.count}</td></tr>" for d in dups
+        )
+        link = f"<a class='fileref' href='{e(fileref)}'>{e(fileref)}</a>"
+        return (
+            f"<table><tr><th>Key</th><th>Occurrences</th></tr>{rows}</table>"
+            f"<p class='sample-note'>Full records: {link} · "
+            f"Per-key counts (all duplicate keys): {count_link}</p>"
+        )
+
+    def orphan_block(keys: tuple[str, ...], fileref: str) -> str:
+        if not keys:
+            return "<p class='sample-note'>No orphan keys.</p>"
+        chips = " ".join(f"<code>{e(k)}</code>" for k in keys)
+        link = f"<a class='fileref' href='{e(fileref)}'>{e(fileref)}</a>"
+        return (
+            f"<p style='word-break:break-all'>{chips}</p>"
+            f"<p class='sample-note'>Sample of keys. Full records: {link}</p>"
+        )
+
+    return (
+        f"<h3>Matched (sample)</h3>{matches_html}"
+        f"<h3>Mismatched (key · File A · File B)</h3>{mismatches_html}"
+        f"<h3>Duplicate keys — File A</h3>"
+        f"{dup_table(samples.dups_a, DUPS_A_FILE, DUPS_A_COUNT_FILE)}"
+        f"<h3>Duplicate keys — File B</h3>"
+        f"{dup_table(samples.dups_b, DUPS_B_FILE, DUPS_B_COUNT_FILE)}"
+        f"<h3>Orphan keys — only in File A</h3>"
+        f"{orphan_block(samples.orphans_a, KEYMISMATCH_A_FILE)}"
+        f"<h3>Orphan keys — only in File B</h3>"
+        f"{orphan_block(samples.orphans_b, KEYMISMATCH_B_FILE)}"
     )
 
 

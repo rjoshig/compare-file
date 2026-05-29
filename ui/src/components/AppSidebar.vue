@@ -15,15 +15,19 @@ defineEmits(['navigate'])
 
 const { sidebarCollapsed } = useLayout()
 
+// Nav visibility is controlled from ui/.env (VITE_SHOW_*). Shown by default;
+// set the var to "false" to hide that item. Field Config is always shown.
+const showRunHistory = import.meta.env.VITE_SHOW_RUN_HISTORY !== 'false'
+const showResults = import.meta.env.VITE_SHOW_RESULTS !== 'false'
+
 const primary = [
-  { key: 'field-config', label: 'Field Config', icon: 'tune',      enabled: true  },
-  { key: 'runs',         label: 'Run History',  icon: 'history',   enabled: false },
-  { key: 'results',      label: 'Results',      icon: 'analytics', enabled: false },
-  { key: 'datasets',     label: 'Datasets',     icon: 'database',  enabled: false },
-]
-const secondary = [
-  { key: 'settings', label: 'Settings', icon: 'settings', enabled: false },
-  { key: 'about',    label: 'About',    icon: 'info',     enabled: false },
+  { key: 'field-config', label: 'Field Config', icon: 'tune', enabled: true },
+  ...(showRunHistory
+    ? [{ key: 'runs', label: 'Run History', icon: 'history', enabled: true }]
+    : []),
+  ...(showResults
+    ? [{ key: 'results', label: 'Results', icon: 'analytics', enabled: true }]
+    : []),
 ]
 
 const vTooltip = Tooltip
@@ -50,22 +54,6 @@ const vTooltip = Tooltip
         :disabled="!item.enabled"
         v-tooltip.right="sidebarCollapsed ? item.label : null"
         @click="item.enabled && $emit('navigate', item.key)"
-      >
-        <span class="material-symbols-outlined">{{ item.icon }}</span>
-        <span class="nav-label">{{ item.label }}</span>
-        <span v-if="!item.enabled" class="soon">soon</span>
-      </button>
-    </nav>
-
-    <nav class="nav-section foot">
-      <p class="nav-heading">More</p>
-      <button
-        v-for="item in secondary"
-        :key="item.key"
-        class="nav-item"
-        :class="{ disabled: !item.enabled }"
-        :disabled="!item.enabled"
-        v-tooltip.right="sidebarCollapsed ? item.label : null"
       >
         <span class="material-symbols-outlined">{{ item.icon }}</span>
         <span class="nav-label">{{ item.label }}</span>

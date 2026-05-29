@@ -14,6 +14,7 @@ import RunResultDialog from './RunResultDialog.vue'
 
 import { api } from '../services/api.js'
 import { useTheme } from '../composables/theme.js'
+import { setLastRun } from '../composables/run.js'
 
 const { theme } = useTheme()
 const toast = useToast()
@@ -99,6 +100,7 @@ async function saveAndRun() {
     // current theme so the new tab opens in the matching color scheme.
     result.report_href = `${result.report_url}?theme=${theme.value}`
     runResult.value = result
+    setLastRun(result)
     resultDialogOpen.value = true
   } catch (e) {
     toast.add({ severity: 'error', summary: 'Run failed', detail: e.message, life: 8000 })

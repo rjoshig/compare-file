@@ -34,6 +34,8 @@ export const api = {
   saveConfig: (body) => request('POST', '/configs', body),
   listConfigs: () => request('GET', '/configs'),
   runCompare: (body) => request('POST', '/runs', body),
+  listRuns: (outputDir) =>
+    request('GET', `/runs${outputDir ? `?output_dir=${encodeURIComponent(outputDir)}` : ''}`),
   browse: (path) =>
     request('GET', `/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 }

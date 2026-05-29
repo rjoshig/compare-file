@@ -130,3 +130,64 @@ def test_operator_alias_unknown_wire_rejected() -> None:
     )
     with pytest.raises(storage.StorageError):
         storage._build_engine_layout(side, tb.layout_a)
+
+
+# ---------------------------------------------------------------------------
+# Run history (ADR-041): directory-derived, newest 5, reads summary.json
+# ---------------------------------------------------------------------------
+
+
+def _make_run_dir(output_dir: Path, stamp: str, matched: int = 4) -> Path:
+    """Create a report-<stamp>/ dir with a minimal summary.json."""
+    rd = output_dir / f"report-{stamp}"
+    rd.mkdir(parents=True)
+    (rd / "summary.json").write_text(
+        json.dumps(
+            {
+                "start_time": f"2026-05-29T00:00:{stamp[-2:]}+00:00",
+                "file_a_path": "/data/a.dat",
+                "file_b_path": "/data/b.dat",
+                "records_matched": matched,
+                "records_mismatched": 1,
+                "keys_in_a_only": 0,
+                "keys_in_b_only": 0,
+                "dups_in_a": 0,
+                "dups_in_b": 0,
+            }
+        )
+    )
+    return rd
+
+
+def test_scan_run_history_returns_newest_five(tmp_path: Path) -> None:
+    out = tmp_path / "runs"
+    for i in range(7):
+        _make_run_dir(out, f"2026-05-29-10-00-0{i}", matched=i)
+    (out / "not-a-run").mkdir()  # ignored — wrong prefix
+
+    history = storage.scan_run_history(out)
+    assert len(history) == 5  # capped, newest first
+    assert [h["run_dir_name"] for h in history] == [
+        "report-2026-05-29-10-00-06",
+        "report-2026-05-29-10-00-05",
+        "report-2026-05-29-10-00-04",
+        "report-2026-05-29-10-00-03",
+        "report-2026-05-29-10-00-02",
+    ]
+    # Metrics + file names come from each run's summary.json.
+    assert history[0]["records_matched"] == 6
+    assert history[0]["file_a"] == "a.dat"
+    assert history[0]["records_mismatched"] == 1
+
+
+def test_scan_run_history_missing_dir_is_empty(tmp_path: Path) -> None:
+    assert storage.scan_run_history(tmp_path / "nope") == []
+
+
+def test_scan_run_history_tolerates_missing_summary(tmp_path: Path) -> None:
+    out = tmp_path / "runs"
+    rd = out / "report-2026-05-29-10-00-00"
+    rd.mkdir(parents=True)  # no summary.json
+    history = storage.scan_run_history(out)
+    assert len(history) == 1
+    assert history[0]["records_matched"] == 0  # zeroed, not dropped

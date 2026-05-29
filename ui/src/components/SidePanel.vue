@@ -3,7 +3,6 @@ import { ref } from 'vue'
 import Panel from 'primevue/panel'
 import InputText from 'primevue/inputtext'
 import Button from 'primevue/button'
-import Tag from 'primevue/tag'
 import ProgressBar from 'primevue/progressbar'
 import FileBrowserDialog from './FileBrowserDialog.vue'
 
@@ -81,9 +80,6 @@ const dirDialogOpen = ref(false)
             :pt="{ root: { style: 'height: 4px' } }"
           />
         </div>
-        <div class="side-foot" v-if="!canRun && !busy">
-          <Tag value="Pick files + a key field" severity="warn" />
-        </div>
       </div>
     </Panel>
 
@@ -145,5 +141,4 @@ const dirDialogOpen = ref(false)
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
-.side-foot { display: flex; justify-content: center; margin-top: 0.4rem; }
 </style>

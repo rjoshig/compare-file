@@ -1631,3 +1631,143 @@ the committed demo fixture (`examples/sample_*.dat`) contained no
   validator rejects it); the projection enforces the same dedupe.
 - A standalone, fully-commented example layout lives at
   `config/layout_example_segment_alias.json`.
+
+---
+
+## ADR-040 — Sample records in the HTML report + Results view; nav trim
+
+**Status:** accepted; extends ADR-035/036 (reports) and the Phase 3 UI
+
+**Context:** The HTML report already showed aggregate counts, the
+per-segment breakdown, and a per-key Y/N mismatch matrix, but no actual
+*record* examples. Operators wanted to eyeball a few concrete rows per
+category without opening the raw `.dat` files: matched records, the
+side-by-side File A / File B for mismatches, which keys duplicated (and
+how many times), and which keys were orphaned. The Phase 3 dashboard
+also carried speculative, non-functional nav tiles (Datasets, Settings,
+About) and a stubbed Results tile.
+
+**Decision:**
+
+1. **Samples live in the report only.** A new ``RunSamples`` bundle
+   (``RecordSample`` / ``MismatchSample`` / ``DupCount``) rides on
+   ``CompareReports``; ``write_compare_reports_html`` renders a "Sample
+   records" section from it. Caps: matches 5, mismatches 10, dups 10,
+   orphans 10 (``*_SAMPLE_SIZE`` constants). These are illustrative —
+   ``summary.json`` aggregates remain the source of truth.
+2. **Population is mode-specific but identical in shape.** dups/orphans
+   come from the master's in-memory dicts/sets in both pipeline paths.
+   Match/mismatch samples are captured inline in the single-process loop
+   and read back from the merged ``matches.dat`` / ``mismatches.dat`` in
+   the parallel path (the master has no in-memory copy of worker output;
+   the merged files are complete + closed by report time). Mirrors how
+   ``key_matrix_entries`` are already handled per mode. Read-back is
+   cheap because the caps are tiny.
+3. **Per-key dup-count CSVs.** Two new full (not sampled) outputs —
+   ``dups_A_count_report.csv`` / ``dups_B_count_report.csv`` (``key,count``,
+   one row per duplicate key with its occurrence count in that file, sorted by
+   key) — are written by ``write_dups_count_report`` in both pipeline paths and
+   linked from the report's dups subsection alongside the ``dups_*.dat`` links.
+   Output file count: 11 → 13.
+
+4. **Segment aliases are NOT shown in the report.** The Layouts meta block no
+   longer renders the alias rules (e.g. ``AD01→EMAD after EM01``) — aliasing is
+   an internal backend concern; the report stays operator-facing.
+
+5. **Results view.** The previously-stubbed "Results" tile becomes a real
+   view: metric cards (reusing ``RunResultPanel``) + a per-segment table
+   fetched from the run's ``summary.json`` + a prominent "Open report"
+   link. The sample *tables* are not duplicated in the UI — they live in
+   the report, keeping one source of truth. The last run is shared via a
+   small ``composables/run.js`` singleton so navigating to Results
+   doesn't lose it.
+6. **Nav trim.** The non-functional "Datasets" tile and the entire
+   bottom group ("Settings", "About") are removed from the sidebar.
+   "Run History" stays as a disabled "soon" tile (deferred — it needs
+   run persistence, out of scope here).
+
+**Consequences:**
+
+- The output *file* set is unchanged (still 11 files); only the HTML
+  report gained a section. No new endpoint — Results fetches the
+  existing ``/api/runs/{token}/summary.json``.
+- Parallel and single-process reports show equivalent sample sections
+  (asserted in ``tests/test_parallel.py``).
+- A future "Run History" view (newest-N runs, capped at 10) would add a
+  ``GET /api/runs`` list endpoint that scans the output dir or a
+  manifest — recorded here as the deferred next step.
+
+---
+
+## ADR-041 — Run History is directory-driven; nav toggles via .env
+
+**Status:** accepted; builds on ADR-037 (per-run subdirs) and ADR-040
+
+**Context:** ADR-040 deferred Run History. When picked up, the first cut used a
+small capped JSON manifest (``run_history.json``) updated on each run. Operator
+feedback reframed it: history should reflect *"the latest 5 runs based on what
+it sees in the [selected output] directory"* — i.e., driven by the directory,
+not a side-channel manifest. Each run already lands in a
+``report-YYYY-MM-DD-HH-MM-SS/`` subdir with a ``summary.json`` (ADR-037), so the
+directory IS the history.
+
+**Decision:**
+
+1. **Directory-driven, zero stored state.** ``storage.scan_run_history(
+   output_dir, limit=5)`` lists ``report-*`` subdirs (their timestamp names sort
+   chronologically), takes the newest 5, and reads each ``summary.json`` for the
+   headline metrics + file names. No manifest, no ``record_run`` — the manifest
+   approach was removed before it shipped. ``GET /api/runs?output_dir=<path>``
+   exposes it; missing/non-dir path → empty list.
+2. **The 405 fix.** ``/api/runs`` previously had only ``POST``, so a ``GET`` to
+   it returned *405 Method Not Allowed*. Adding the ``GET`` handler resolves it.
+3. **UI.** The Run History view has an output-directory input + the existing
+   dir Browse dialog; it lists the newest 5 there, with per-row "Results"
+   (loads the run into the Results view via the shared ``lastRun``) and
+   "Report" (opens that run's HTML). Cap = 5.
+4. **Nav visibility via .env.** ``ui/.env`` exposes ``VITE_SHOW_RESULTS`` /
+   ``VITE_SHOW_RUN_HISTORY`` (Vite build-time env). Both default **shown**
+   (hidden only when explicitly ``=false``); ``AppSidebar`` filters the nav
+   accordingly. Field Config is always shown.
+5. **Report polish.** The HTML report's Layouts meta drops the "Layout file"
+   row, and the "Config provenance" section is renamed "Run configs". (Segment
+   aliases were already removed from the report per ADR-040.) The Run panel's
+   "Pick files + a key field" hint tag was removed from the UI.
+
+**Consequences:**
+
+- Run History needs no cleanup/pruning logic and can never drift from disk —
+  delete a ``report-*`` folder and it simply stops appearing. "Don't store more
+  unnecessarily" is satisfied by storing *nothing*.
+- ``config_name`` isn't in ``summary.json`` (the engine doesn't know the UI's
+  config name), so history shows the input file names instead.
+- Pointing the view at a different output directory shows that directory's
+  runs — naturally multi-folder without any registry.
+
+---
+
+## ADR-042 — Sample records render as raw, copy-pasteable code blocks
+
+**Status:** accepted; refines ADR-040
+
+**Context:** ADR-040's "Sample records" section rendered matched/mismatched
+records in HTML tables with wrapping cells. Operators wanted to *copy* a record
+verbatim into a text editor to eyeball differences — wrapping table cells make
+that painful (line breaks get pulled in, columns interleave).
+
+**Decision:** Render the matched and mismatched samples as raw monospace code
+blocks (``<pre class="sample-block">``), one record per line, **no wrapping**
+(``white-space: pre`` + ``overflow-x: auto`` for horizontal scroll):
+
+- Matched: ``<key>  <full record>`` — one line each.
+- Mismatched: two lines per key — ``<key> | A | <record>`` then
+  ``<key> | B | <record>`` — so copying the adjacent pair diffs cleanly.
+
+The dups (key + count) and orphans (keys) subsections keep their compact table /
+chip rendering — they're not full-record data. Styling is a `.sample-block`
+class in the report's inline stylesheet (not an inline ``style`` attribute,
+which broke on the quoted ``"JetBrains Mono"`` font name).
+
+**Consequences:** select-all + copy from the block yields clean, one-record-
+per-line text. Long records scroll horizontally instead of reflowing. The
+full, untruncated data still lives in ``mismatches.dat`` (linked).

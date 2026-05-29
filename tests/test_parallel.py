@@ -70,6 +70,8 @@ def test_parallel_output_matches_single_process(tmp_path: Path, workers: int) ->
         "keymismatch_B.dat",
         "dups_A.dat",
         "dups_B.dat",
+        "dups_A_count_report.csv",
+        "dups_B_count_report.csv",
     ):
         assert (
             _stamped(out_single, base).read_bytes() == _stamped(out_parallel, base).read_bytes()
@@ -102,6 +104,14 @@ def test_parallel_output_matches_single_process(tmp_path: Path, workers: int) ->
         assert (
             p.mismatch_count == s.mismatch_count
         ), f"workers={workers}: per-segment mismatch for {s.segment_name} differs"
+
+    # ADR-040: the report's "Sample records" section is equivalent across paths.
+    # (Parallel reads samples back from the merged files; single captures inline.)
+    html_single = _stamped(out_single, "compare_reports.html").read_text()
+    html_parallel = _stamped(out_parallel, "compare_reports.html").read_text()
+    for marker in ("Sample records", "KEY000000008", "KEY000000009", "KEY000000006"):
+        assert marker in html_single
+        assert marker in html_parallel, f"workers={workers}: report missing {marker}"
 
 
 def test_run_parallel_rejects_zero_workers(tmp_path: Path) -> None:

@@ -9,6 +9,142 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-29 (ADR-041 — Run History (dir-driven), nav .env toggles, report polish)
+
+**Branch:** `dev`
+**Phase:** 3 (web UI) + report polish
+**Status:** Shipped + verified in-browser. 232 tests pass; black/flake8/mypy
+clean; `ui/` builds. Run History lists newest-5 from a chosen output dir.
+
+### What was completed
+
+- **Run History (ADR-041) — directory-driven, no stored state.** Operator
+  reframed it to "newest 5 based on what's in the selected output directory."
+  `storage.scan_run_history(output_dir, 5)` lists `report-*` subdirs (newest
+  first), reads each `summary.json`. `GET /api/runs?output_dir=<path>`. Removed
+  the briefly-built manifest (`record_run`/`run_history.json`) entirely.
+  `RunHistoryView.vue`: output-dir input + Browse + Refresh + table (When /
+  files / 6 metrics) with per-row "Results" (loads into Results via shared
+  `lastRun`) and "Report" links. Verified: scanning `/tmp/segment_compare/runs`
+  shows the runs with correct metrics.
+- **405 fix.** `/api/runs` had only `POST`, so the UI's `GET` returned 405.
+  Added the `GET` handler — resolved.
+- **Nav toggles via `ui/.env`.** `VITE_SHOW_RESULTS` / `VITE_SHOW_RUN_HISTORY`
+  (default shown; `=false` hides). `AppSidebar` filters accordingly.
+- **Report polish:** dropped the "Layout file" meta row; renamed "Config
+  provenance" → "Run configs". (Aliases already removed in ADR-040.)
+- **UI:** removed the "Pick files + a key field" hint tag from the Run panel.
+- **Tests:** `test_api_storage.py` run-history tests rewritten for
+  `scan_run_history` (newest-5, missing-dir empty, missing-summary tolerated);
+  `test_writer.py` heading assertion updated to "Run configs".
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-041**: Run History is directory-driven (scan `report-*` + `summary.json`,
+  newest 5), no manifest; nav visibility via `.env`; report meta trims.
+
+### Next concrete action
+
+Commit the accumulated `dev` work (Results + samples + dup-count CSVs + report
+trims + Run History + UI fixes). Optional follow-ups: saved-config picker;
+front-end test harness; per-run "delete" from Run History.
+
+### Notes for future me
+
+- Run History stores nothing — delete a `report-*` folder and it stops showing.
+  `config_name` isn't in `summary.json`, so history shows input file names.
+- `.env` is Vite build-time: restart `npm run dev` after editing it.
+
+---
+
+## Session: 2026-05-29 (ADR-040 — sample records in report + Results view + nav trim)
+
+**Branch:** `dev`
+**Phase:** 3 (web UI) + engine report enhancement
+**Status:** Shipped. 227 tests pass on `.venv`; black/flake8/mypy clean; `ui/`
+builds. Report + single/parallel sample sections verified end-to-end.
+
+### Why
+
+Operator review of the dashboard: Run History/Results/Datasets were all stub
+"soon" tiles; "Datasets" had no defined purpose. Ask: cap Run History at 10
+(deferred — needs persistence), build Results, drop Datasets, and add sample
+records (match/mismatch/dups/orphans) — decided to land samples in the **HTML
+report only**, with Results linking to it. Also drop Settings + About.
+
+### What was completed (ADR-040)
+
+- **Engine (`writer.py`):** new `RunSamples` / `RecordSample` /
+  `MismatchSample` / `DupCount` dataclasses on `CompareReports`; a "Sample
+  records" section in `compare_reports.html` (matches 5, mismatches 10 with
+  key·A·B, dups key+count 10, orphans keys 10 — `*_SAMPLE_SIZE` consts). Empty
+  states render gracefully.
+- **Per-key dup-count CSVs (follow-up ask):** `dups_A_count_report.csv` /
+  `dups_B_count_report.csv` (full `key,count`, sorted) via
+  `write_dups_count_report`, written in both pipeline paths and linked from the
+  report's dups subsection. Output files 11 → 13.
+- **Report trim (follow-up ask):** the Layouts meta block no longer shows
+  segment-alias rules — aliasing is a backend concern, not operator-facing.
+- **UI overflow fix (follow-up ask):** `PrefixConfig.vue` rebuilt from a rigid
+  grid (which let the BIN/ASC segmented control overflow the `overflow:hidden`
+  panel — ASC was unclickable) to a flex layout where the controls stay one
+  unit pushed right and wrap below the label when cramped. Added global safety
+  rules in `style.css` (`.p-panel-content { min-width:0 }` + child
+  `max-width:100%`) so panel children shrink/wrap instead of clipping. Verified
+  at 1450 / 1150 px — nothing escapes its border.
+- **Pipeline:** single-process captures match/mismatch inline; parallel reads
+  them back from the merged `matches.dat` / `mismatches.dat` (`_read_match_samples`
+  / `_parse_mismatch_samples`); dups/orphans from master memory in both
+  (`_dup_orphan_samples`). Mirrors the per-mode handling of `key_matrix_entries`.
+- **UI:** `ResultsView.vue` (cards via `RunResultPanel` + per-segment table
+  fetched from `summary.json` + Open-report link); `composables/run.js`
+  singleton shares the last run; `App.vue` routes `results`. Sidebar
+  (`AppSidebar.vue`): enabled Results, **removed Datasets + the whole
+  Settings/About group**; Run History stays "soon".
+- **Tests:** `test_writer.py` sample-section render + empty states; oracle
+  asserts the report carries real fixture samples (dups 08/09, orphans 06/12);
+  `test_parallel.py` asserts single≡parallel sample sections.
+- **Docs:** ADR-040; `architecture.md` writer row.
+
+### What's pending
+
+- **Run History** (deferred): needs run persistence. Plan: `GET /api/runs`
+  scans the output dir (or a manifest) for `report-*/`, reads each
+  `summary.json`, returns newest 10 (the requested cap). Then a Run History
+  view that opens each run's Results.
+- No front-end test harness still; Results verified via build + reused
+  components + the working `summary.json` endpoint. Sidebar change verified
+  visually.
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-040**: sample records in the HTML report (capped); Results view reads
+  `summary.json` + links to the report; Datasets/Settings/About removed from
+  nav; Run History deferred.
+
+### Next concrete action
+
+Build Run History: add `GET /api/runs` (newest 10 from the output dir) + a
+view, reusing `ResultsView` to open a selected run.
+
+### Notes for future me
+
+- Samples are illustrative; `summary.json` stays the source of truth. The
+  parallel path re-reads the merged files (cheap at these caps) rather than
+  threading sample bytes through `WorkerResult`.
+- `lastRun` (composables/run.js) is in-memory only — a page reload clears it;
+  Run History will make results durable.
+
+---
+
 ## Session: 2026-05-29 (ADR-039 — segment aliases in the Web UI + demo fixture)
 
 **Branch:** `dev`

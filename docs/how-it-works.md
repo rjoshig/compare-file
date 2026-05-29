@@ -20,7 +20,7 @@ choices; this document covers the *how* end-to-end.
 > → hash → compare) described here is unchanged.
 >
 > **Output-layout update (ADR-035 / ADR-036 / ADR-037 / ADR-038):**
-> The run now produces **11 output files** (not 8). Three were added
+> The run now produces **13 output files** (not 8). Three were added
 > after the original draft of this document: ``compare_reports.csv``
 > and ``compare_reports.html`` (ADR-035, with the HTML overhaul in
 > ADR-036 adding side-by-side layouts, file-linked aggregate counts,
@@ -35,7 +35,7 @@ choices; this document covers the *how* end-to-end.
 
 ## TL;DR
 
-Two large fixed-format files come in, 11 output files come out (in
+Two large fixed-format files come in, 13 output files come out (in
 a per-run subdir). In between:
 
 1. **Parse** — both files are streamed end-to-end; each record's
@@ -469,7 +469,7 @@ segment type in `report.csv` and a side-by-side block in
 
 ## Step 5 — Write outputs
 
-The writer (`writer.py`) emits 11 output files per run. Successive
+The writer (`writer.py`) emits 13 output files per run. Successive
 runs land in their own ``report-YYYY-MM-DD-HH-MM-SS`` subdirectories
 under ``--output-dir`` (ADR-037, supersedes ADR-027's
 filename-stamping rule), so files inside use bare names

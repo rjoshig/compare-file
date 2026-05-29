@@ -123,6 +123,10 @@ body {
 .p-button { border-radius: 8px !important; font-weight: 500 !important; }
 .p-panel .p-panel-header { border-radius: var(--radius-md) var(--radius-md) 0 0; }
 .p-panel { border-radius: var(--radius-md); overflow: hidden; }
+/* Panels are overflow:hidden for the rounded-card look; let their content
+   shrink so flex/grid children wrap instead of being clipped at the border. */
+.p-panel-content { min-width: 0; }
+.p-panel-content > * { max-width: 100%; }
 .p-card { border-radius: var(--radius-md); box-shadow: var(--elev-1); }
 
 /* Make Material input fields play well with our surface tokens. */

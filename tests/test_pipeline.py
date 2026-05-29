@@ -129,6 +129,29 @@ def test_run_against_sample_files_matches_oracle(tmp_path: Path) -> None:
     assert by_seg["AD01"].mismatch_count == 0
     assert by_seg["EMAD"].mismatch_count == 0
 
+    # ADR-040: the HTML report carries a "Sample records" section reflecting the
+    # real fixture — dup KEY...08 (×2 in A), KEY...09 (×2 in B), orphans 06/07/12.
+    html = _stamped(out, "compare_reports.html").read_text()
+    assert "Sample records" in html
+    assert "KEY000000008" in html  # dup in A
+    assert "KEY000000009" in html  # dup in B
+    assert "KEY000000006" in html  # orphan in A
+    assert "KEY000000012" in html  # orphan in B
+    # A mismatched key shows up in the side-by-side mismatch sample.
+    assert "KEY000000003" in html
+    # Segment-alias info is a backend concern — not surfaced in the report.
+    assert "<dt>Aliases" not in html
+    assert "after EM01" not in html
+
+    # ADR-040: full per-key dup-count CSVs exist per side and are linked.
+    dups_a_counts = _stamped(out, "dups_A_count_report.csv").read_text().splitlines()
+    dups_b_counts = _stamped(out, "dups_B_count_report.csv").read_text().splitlines()
+    assert dups_a_counts[0] == "key,count"
+    assert "KEY000000008,2" in dups_a_counts  # dup key in A occurred twice
+    assert "KEY000000009,2" in dups_b_counts
+    assert "href='dups_A_count_report.csv'" in html
+    assert "href='dups_B_count_report.csv'" in html
+
 
 # ---------------------------------------------------------------------------
 # Synthetic scenarios using a fresh tmp_path

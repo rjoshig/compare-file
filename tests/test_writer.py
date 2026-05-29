@@ -14,7 +14,9 @@ from segment_compare.layout import load_file_layout
 from segment_compare.writer import (
     COMPARE_REPORTS_CSV_FILE,
     COMPARE_REPORTS_HTML_FILE,
+    DUPS_A_COUNT_FILE,
     DUPS_A_FILE,
+    DUPS_B_COUNT_FILE,
     DUPS_B_FILE,
     KEY_MATRIX_FILE,
     KEYMISMATCH_A_FILE,
@@ -24,13 +26,18 @@ from segment_compare.writer import (
     REPORT_FILE,
     SUMMARY_FILE,
     CompareReports,
+    DupCount,
     KeyMatrixEntry,
+    MismatchSample,
     OutputWriter,
+    RecordSample,
+    RunSamples,
     SegmentSummary,
     Summary,
     stamped_filename,
     write_compare_reports_csv,
     write_compare_reports_html,
+    write_dups_count_report,
     write_keys_mismatch_matrix_csv,
 )
 
@@ -337,6 +344,7 @@ def _reports(
     output_dir: Path,
     key_matrix_entries: tuple[KeyMatrixEntry, ...] = (),
     matrix_segments: tuple[str, ...] = ("TU4R", "NM01", "ENDS"),
+    samples: RunSamples | None = None,
 ) -> CompareReports:
     """Wrap a Summary into a CompareReports using the committed layouts."""
     return CompareReports(
@@ -346,6 +354,7 @@ def _reports(
         key_matrix_entries=key_matrix_entries,
         matrix_segments=matrix_segments,
         output_dir=output_dir,
+        samples=samples if samples is not None else RunSamples(),
     )
 
 
@@ -497,7 +506,7 @@ def test_compare_reports_html_is_self_contained_and_well_formed(tmp_path: Path) 
         "Per-segment breakdown",
         "Per-key mismatch sample",
         "Timing",
-        "Config provenance",
+        "Run configs",
     ):
         assert heading in text, f"missing heading: {heading}"
 
@@ -580,6 +589,68 @@ def test_compare_reports_html_per_key_sample_renders_and_links_to_full_matrix(
     assert ">TR01<" in text
     # Sample-note link points at the bare matrix file (ADR-037).
     assert "href='keys_mismatch_matrix.csv'" in text
+
+
+def test_compare_reports_html_sample_records_section(tmp_path: Path) -> None:
+    """ADR-040: the Sample records section renders each category + links."""
+    path = tmp_path / "reports.html"
+    summary = _multi_segment_summary(tmp_path)
+    samples = RunSamples(
+        matches=(RecordSample("KEYMATCH0001", "TU4R...matched-A-bytes"),),
+        mismatches=(MismatchSample("KEYMIS0001", "TU4R...A-side-bytes", "TU4R...B-side-bytes"),),
+        dups_a=(DupCount("KEYDUP000A", 2),),
+        dups_b=(DupCount("KEYDUP000B", 3),),
+        orphans_a=("KEYORPHANA1",),
+        orphans_b=("KEYORPHANB1", "KEYORPHANB2"),
+    )
+    write_compare_reports_html(_reports(summary, tmp_path, samples=samples), path)
+    text = path.read_text(encoding="utf-8")
+
+    assert "Sample records" in text
+    # Matched + mismatched records (key + both sides) render.
+    assert "KEYMATCH0001" in text and "matched-A-bytes" in text
+    assert "KEYMIS0001" in text
+    assert "A-side-bytes" in text and "B-side-bytes" in text
+    # Dups show key + occurrence count; orphans show keys.
+    assert "KEYDUP000A" in text and ">2<" in text
+    assert "KEYDUP000B" in text and ">3<" in text
+    assert "KEYORPHANA1" in text
+    assert "KEYORPHANB1" in text and "KEYORPHANB2" in text
+    # Links out to the full diagnostic / record files.
+    assert "href='mismatches.dat'" in text
+    assert "href='dups_A.dat'" in text
+    assert "href='keymismatch_B.dat'" in text
+    # Per-key dup-count CSVs are linked alongside the dups_*.dat files (ADR-040).
+    assert "href='dups_A_count_report.csv'" in text
+    assert "href='dups_B_count_report.csv'" in text
+
+
+def test_write_dups_count_report(tmp_path: Path) -> None:
+    """ADR-040: per-key dup-count CSV is header + key,count rows sorted by key."""
+    path = tmp_path / DUPS_A_COUNT_FILE
+    write_dups_count_report({"KEY000000008": 2, "KEY000000003": 3}, path)
+    rows = path.read_text().splitlines()
+    assert rows[0] == "key,count"
+    assert rows[1] == "KEY000000003,3"  # sorted by key
+    assert rows[2] == "KEY000000008,2"
+
+
+def test_write_dups_count_report_empty_writes_header_only(tmp_path: Path) -> None:
+    path = tmp_path / DUPS_B_COUNT_FILE
+    write_dups_count_report({}, path)
+    assert path.read_text().splitlines() == ["key,count"]
+
+
+def test_compare_reports_html_sample_records_empty_states(tmp_path: Path) -> None:
+    """With no samples, each category renders a graceful empty note."""
+    path = tmp_path / "reports.html"
+    write_compare_reports_html(_reports(_multi_segment_summary(tmp_path), tmp_path), path)
+    text = path.read_text(encoding="utf-8")
+    assert "Sample records" in text
+    assert "No matched records." in text
+    assert "No mismatched records." in text
+    assert "No duplicate keys." in text
+    assert "No orphan keys." in text
 
 
 def test_compare_reports_html_renders_metric_values(tmp_path: Path) -> None:

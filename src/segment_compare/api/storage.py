@@ -225,6 +225,63 @@ def config_dir_for(name: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Run history — derived from the output directory, nothing stored (ADR-041)
+# ---------------------------------------------------------------------------
+
+# Each run lands in a `report-YYYY-MM-DD-HH-MM-SS/` subdir (ADR-037). Run
+# history is just the newest N of those in a chosen output directory, read back
+# from each run's summary.json. No manifest, no extra state — what you see is
+# what's on disk.
+RUN_DIR_PREFIX = "report-"
+DEFAULT_RUN_HISTORY = 5
+
+
+def scan_run_history(output_dir: Path, limit: int = DEFAULT_RUN_HISTORY) -> list[dict[str, Any]]:
+    """Return the newest ``limit`` runs found in ``output_dir`` (newest first).
+
+    Looks for ``report-*`` subdirectories (their timestamp names sort
+    chronologically) and reads each one's ``summary.json`` for the headline
+    metrics. Missing/unreadable summaries yield zeroed metrics rather than
+    dropping the run. Returns an empty list if ``output_dir`` isn't a directory.
+    """
+    if not output_dir.exists() or not output_dir.is_dir():
+        return []
+    run_dirs = sorted(
+        (p for p in output_dir.iterdir() if p.is_dir() and p.name.startswith(RUN_DIR_PREFIX)),
+        key=lambda p: p.name,
+        reverse=True,
+    )[:limit]
+
+    out: list[dict[str, Any]] = []
+    for rd in run_dirs:
+        data: dict[str, Any] = {}
+        summary_path = rd / "summary.json"
+        if summary_path.exists():
+            try:
+                loaded = json.loads(summary_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (ValueError, OSError):
+                data = {}
+        out.append(
+            {
+                "run_dir_name": rd.name,
+                "run_dir_path": str(rd),
+                "created_at": str(data.get("start_time", "")),
+                "file_a": Path(str(data.get("file_a_path", ""))).name,
+                "file_b": Path(str(data.get("file_b_path", ""))).name,
+                "records_matched": int(data.get("records_matched", 0)),
+                "records_mismatched": int(data.get("records_mismatched", 0)),
+                "keys_in_a_only": int(data.get("keys_in_a_only", 0)),
+                "keys_in_b_only": int(data.get("keys_in_b_only", 0)),
+                "dups_in_a": int(data.get("dups_in_a", 0)),
+                "dups_in_b": int(data.get("dups_in_b", 0)),
+            }
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # UI-shape → engine-shape projection
 # ---------------------------------------------------------------------------
 

@@ -29,7 +29,7 @@ See `docs/architecture.md` for the full spec.
 
 ## What the tool produces
 
-Each run creates its own subdirectory `report-YYYY-MM-DD-HH-MM-SS` under `--output-dir` (ADR-037). Inside it, eleven output files with bare names:
+Each run creates its own subdirectory `report-YYYY-MM-DD-HH-MM-SS` under `--output-dir` (ADR-037). Inside it, thirteen output files with bare names:
 
 | File | Contents |
 |---|---|
@@ -39,10 +39,12 @@ Each run creates its own subdirectory `report-YYYY-MM-DD-HH-MM-SS` under `--outp
 | `keymismatch_B.dat` | Keys only in File B |
 | `dups_A.dat` | Duplicate-key records pulled from File A |
 | `dups_B.dat` | Duplicate-key records pulled from File B |
+| `dups_A_count_report.csv` | Per-key duplicate counts for File A (`key,count`, all duplicate keys); linked from the HTML report (ADR-040) |
+| `dups_B_count_report.csv` | Per-key duplicate counts for File B (ADR-040) |
 | `report.csv` | Per-mismatch rows (one row per mismatched segment-type per record) |
 | `summary.json` | Aggregates, timings, config hash, file metadata (machine-readable source of truth) |
 | `compare_reports.csv` | Same aggregates as `summary.json`, in a 3-column long-format CSV for spreadsheets, plus an `output_files` section linking each metric to its file (ADR-035 / ADR-036) |
-| `compare_reports.html` | Same aggregates rendered as a self-contained HTML page with side-by-side layouts, file-link aggregate counts, and a 20-row sample of the key matrix (ADR-035 / ADR-036) |
+| `compare_reports.html` | Same aggregates rendered as a self-contained HTML page with side-by-side layouts, file-link aggregate counts, a 20-row sample of the key matrix, and a "Sample records" section (matches / mismatches A↔B / dups / orphans) (ADR-035 / ADR-036 / ADR-040) |
 | `keys_mismatch_matrix.csv` | Per-key Y/N matrix of which segments mismatched; one row per joined-key record with at least one segment mismatch + last column listing segments with count differences (ADR-036) |
 
 Successive runs land in independent `report-…` subdirectories (per ADR-037), so they never clobber each other. ADR-027's old `<base>_YYYYMMDDHHMM.<ext>` stamp-in-filename scheme is superseded — the subdirectory provides the disambiguation now.
@@ -159,7 +161,7 @@ python -m segment_compare --config-dir /etc/segment-compare/strict/ ...
 
 #### `--output-dir` (required for runs)
 
-Parent directory for run outputs. Created if missing. Each invocation creates its own `report-YYYY-MM-DD-HH-MM-SS/` subdirectory inside it; all 11 output files (bare-named) land in that subdir, so re-runs sit beside each other as independent folders (ADR-037).
+Parent directory for run outputs. Created if missing. Each invocation creates its own `report-YYYY-MM-DD-HH-MM-SS/` subdirectory inside it; all 13 output files (bare-named) land in that subdir, so re-runs sit beside each other as independent folders (ADR-037).
 
 ```bash
 python -m segment_compare ... --output-dir /var/log/segcmp/$(date +%Y%m%d)/
@@ -334,7 +336,7 @@ python -m segment_compare --log-level DEBUG \
 ```
 
 For the full step-by-step explanation of what happens between
-`python -m segment_compare ...` and the 11 output files, see
+`python -m segment_compare ...` and the 13 output files, see
 **[docs/how-it-works.md](docs/how-it-works.md)**.
 
 ## Repository layout
@@ -377,7 +379,7 @@ compare-file/
 │       ├── normalizer.py                  # position + composite dispatch
 │       ├── hasher.py                      # blake2b + builtin behind a Protocol
 │       ├── comparator.py                  # per-record multiset hash compare
-│       ├── writer.py                      # 11 output files + Summary + report writers
+│       ├── writer.py                      # 13 output files + Summary + report writers
 │       ├── pipeline.py                    # run() / run_parallel() / dry_run()
 │       ├── partitioner.py                 # equal-count key partitioning
 │       ├── worker.py                      # subprocess entry point

@@ -4,6 +4,8 @@ import Toast from 'primevue/toast'
 import AppBar from './components/AppBar.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import FieldConfig from './components/FieldConfig.vue'
+import ResultsView from './components/ResultsView.vue'
+import RunHistoryView from './components/RunHistoryView.vue'
 import { useLayout } from './composables/layout.js'
 
 const { sidebarCollapsed, mobileMenuActive, closeMobileMenu } = useLayout()
@@ -15,9 +17,6 @@ const breadcrumb = computed(() => {
     'field-config': 'Field Configuration',
     runs: 'Run History',
     results: 'Results',
-    datasets: 'Datasets',
-    settings: 'Settings',
-    about: 'About',
   }
   return map[activeView.value] || ''
 })
@@ -47,6 +46,15 @@ const shellClass = computed(() => ({
       <AppBar :breadcrumb="breadcrumb" />
       <main class="view">
         <FieldConfig v-if="activeView === 'field-config'" />
+        <ResultsView
+          v-else-if="activeView === 'results'"
+          @go-config="activeView = 'field-config'"
+        />
+        <RunHistoryView
+          v-else-if="activeView === 'runs'"
+          @go-results="activeView = 'results'"
+          @go-config="activeView = 'field-config'"
+        />
         <div v-else class="placeholder">
           <span class="material-symbols-outlined">construction</span>
           <p class="t-headline">Coming soon</p>

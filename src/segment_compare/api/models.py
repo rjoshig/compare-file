@@ -170,6 +170,27 @@ class RunResponse(BaseModel):
     dups_in_b: int
 
 
+class RunHistoryEntry(BaseModel):
+    """One past run, read from a `report-*` dir's summary.json (ADR-041)."""
+
+    run_dir_name: str
+    run_dir_path: str
+    report_url: str
+    created_at: str
+    file_a: str
+    file_b: str
+    records_matched: int
+    records_mismatched: int
+    keys_in_a_only: int
+    keys_in_b_only: int
+    dups_in_a: int
+    dups_in_b: int
+
+
+class RunHistoryListResponse(BaseModel):
+    runs: list[RunHistoryEntry]
+
+
 # ---------------------------------------------------------------------------
 # Error envelope
 # ---------------------------------------------------------------------------

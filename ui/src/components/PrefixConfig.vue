@@ -39,53 +39,57 @@ const rdwEncOpts = [
     <div class="row" :class="{ disabled: !stripEnabled }">
       <Checkbox v-model="stripEnabled" inputId="stripT" binary />
       <label for="stripT" class="row-label code">strip_leading_bytes</label>
-      <InputNumber
-        v-model="side.strip_leading_bytes.size"
-        :disabled="!stripEnabled"
-        :min="1"
-        placeholder="bytes"
-        :showButtons="false"
-        class="cell-num"
-      />
-      <SelectButton
-        v-model="side.strip_leading_bytes.encoding"
-        :options="stripEncOpts"
-        optionLabel="label"
-        optionValue="value"
-        :disabled="!stripEnabled"
-        :allowEmpty="false"
-        class="cell-seg"
-      />
+      <div class="controls">
+        <InputNumber
+          v-model="side.strip_leading_bytes.size"
+          :disabled="!stripEnabled"
+          :min="1"
+          placeholder="bytes"
+          :showButtons="false"
+          class="cell-num"
+        />
+        <SelectButton
+          v-model="side.strip_leading_bytes.encoding"
+          :options="stripEncOpts"
+          optionLabel="label"
+          optionValue="value"
+          :disabled="!stripEnabled"
+          :allowEmpty="false"
+          class="cell-seg"
+        />
+      </div>
     </div>
 
     <div class="row" :class="{ disabled: !rdwEnabled }">
       <Checkbox v-model="rdwEnabled" inputId="rdwT" binary />
       <label for="rdwT" class="row-label code">rdw</label>
-      <InputNumber
-        v-model="side.rdw.rdw1_bytes"
-        :disabled="!rdwEnabled"
-        :min="1"
-        placeholder="r1"
-        :showButtons="false"
-        class="cell-num"
-      />
-      <InputNumber
-        v-model="side.rdw.rdw2_bytes"
-        :disabled="!rdwEnabled"
-        :min="1"
-        placeholder="r2"
-        :showButtons="false"
-        class="cell-num"
-      />
-      <SelectButton
-        v-model="side.rdw.encoding"
-        :options="rdwEncOpts"
-        optionLabel="label"
-        optionValue="value"
-        :disabled="!rdwEnabled"
-        :allowEmpty="false"
-        class="cell-seg"
-      />
+      <div class="controls">
+        <InputNumber
+          v-model="side.rdw.rdw1_bytes"
+          :disabled="!rdwEnabled"
+          :min="1"
+          placeholder="r1"
+          :showButtons="false"
+          class="cell-num"
+        />
+        <InputNumber
+          v-model="side.rdw.rdw2_bytes"
+          :disabled="!rdwEnabled"
+          :min="1"
+          placeholder="r2"
+          :showButtons="false"
+          class="cell-num"
+        />
+        <SelectButton
+          v-model="side.rdw.encoding"
+          :options="rdwEncOpts"
+          optionLabel="label"
+          optionValue="value"
+          :disabled="!rdwEnabled"
+          :allowEmpty="false"
+          class="cell-seg"
+        />
+      </div>
     </div>
   </div>
 </template>
@@ -94,46 +98,69 @@ const rdwEncOpts = [
 .prefix {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.3rem;
   width: 100%;
+  min-width: 0;
 }
 .row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 3.4rem 3.4rem auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.32rem 0.5rem;
+  gap: 0.3rem 0.5rem;
+  padding: 0.3rem 0.5rem;
   background: var(--surface-2);
   border-radius: var(--radius-sm);
   min-width: 0;
 }
-/* strip_leading_bytes has one number cell instead of two. */
-.prefix .row:first-child {
-  grid-template-columns: auto minmax(0, 1fr) 3.4rem 0 auto;
+.row.disabled {
+  opacity: 0.55;
 }
-.row.disabled { opacity: 0.55; }
+.row :deep(.p-checkbox) {
+  flex: 0 0 auto;
+}
 .row-label {
-  font-size: 0.77rem;
+  flex: 1 1 5rem;
+  min-width: 0;
+  font-size: 0.76rem;
   font-weight: 500;
   color: var(--text-strong);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.cell-num { min-width: 0; }
+/* Controls travel together as one unit, pushed to the right. If the row gets
+   too narrow they wrap below the label as a block instead of clipping. */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.cell-num {
+  width: 3.1rem;
+  flex: 0 0 auto;
+}
+.cell-num :deep(.p-inputnumber) {
+  width: 100%;
+}
 .cell-num :deep(input) {
   width: 100% !important;
-  padding: 0.22rem 0.4rem !important;
-  font-size: 0.78rem !important;
+  box-sizing: border-box;
+  padding: 0.2rem 0.35rem !important;
+  font-size: 0.76rem !important;
   text-align: right;
 }
-/* Segmented BIN | ASC control — never overflows, no popup. */
+/* Segmented BIN | ASC control — fixed compact size, never clipped. */
+.cell-seg {
+  flex: 0 0 auto;
+}
 .cell-seg :deep(.p-togglebutton),
 .cell-seg :deep(.p-selectbutton .p-button) {
-  padding: 0.22rem 0.5rem !important;
-  font-size: 0.7rem !important;
+  padding: 0.2rem 0.5rem !important;
+  font-size: 0.68rem !important;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  min-width: 2.4rem;
+  letter-spacing: 0.03em;
+  min-width: 2.2rem;
 }
 </style>

@@ -11,6 +11,8 @@ from fastapi.responses import FileResponse
 
 from segment_compare.api import storage
 from segment_compare.api.models import (
+    RunHistoryEntry,
+    RunHistoryListResponse,
     RunRequest,
     RunResponse,
     SaveConfigRequest,
@@ -97,6 +99,24 @@ def run_compare(body: RunRequest) -> RunResponse:
         dups_in_a=summary.dups_in_a,
         dups_in_b=summary.dups_in_b,
     )
+
+
+@router.get("/runs", response_model=RunHistoryListResponse)
+def list_runs(output_dir: str | None = None) -> RunHistoryListResponse:
+    """Return the newest runs (max 5) found in ``output_dir``.
+
+    Directory-driven: scans for ``report-*`` subdirs and reads each
+    ``summary.json``. No server-side state. Empty list when ``output_dir`` is
+    missing or not a directory.
+    """
+    if not output_dir:
+        return RunHistoryListResponse(runs=[])
+    base = Path(output_dir).expanduser().resolve()
+    runs: list[RunHistoryEntry] = []
+    for h in storage.scan_run_history(base):
+        token = _encode_run_token(Path(h["run_dir_path"]))
+        runs.append(RunHistoryEntry(report_url=f"/api/runs/{token}/report", **h))
+    return RunHistoryListResponse(runs=runs)
 
 
 @router.get("/browse")
