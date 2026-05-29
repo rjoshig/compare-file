@@ -789,38 +789,35 @@ def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
     rows = (
         (
             "Records matched",
-            "Joined records where every segment's hash multiset agreed between A and B.",
+            "Records found in both files with identical content.",
             summary.records_matched,
             "match",
             "records_matched",
         ),
         (
             "Records mismatched",
-            "Joined records with at least one segment-type content or count difference.",
+            "Records found in both files, but the content is different.",
             summary.records_mismatched,
             "mismatch",
             "records_mismatched",
         ),
         (
             "Keys in both",
-            (
-                "Distinct keys present in both files after duplicates "
-                "were segregated — the inner-join domain."
-            ),
+            "Records found in both files, after duplicates are removed.",
             summary.keys_in_both,
             "",
             None,
         ),
         (
             "Keys only in A",
-            "Keys present in File A but absent from File B (orphans, no comparison possible).",
+            "Records found only in File A, not in File B.",
             summary.keys_in_a_only,
             "",
             "keys_in_a_only",
         ),
         (
             "Keys only in B",
-            "Keys present in File B but absent from File A (orphans, no comparison possible).",
+            "Records found only in File B, not in File A.",
             summary.keys_in_b_only,
             "",
             "keys_in_b_only",
@@ -828,8 +825,8 @@ def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
         (
             "Duplicate keys in A",
             (
-                "Records from File A whose key appeared more than once; "
-                "excluded from the inner-join (ADR-019)."
+                "Records in File A where the same key appears more "
+                "than once. Removed before comparison."
             ),
             summary.dups_in_a,
             "",
@@ -838,8 +835,8 @@ def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
         (
             "Duplicate keys in B",
             (
-                "Records from File B whose key appeared more than once; "
-                "excluded from the inner-join (ADR-019)."
+                "Records in File B where the same key appears more "
+                "than once. Removed before comparison."
             ),
             summary.dups_in_b,
             "",

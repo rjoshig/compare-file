@@ -517,9 +517,16 @@ def test_compare_reports_html_aggregate_counts_has_description_column(tmp_path: 
     # Column header present.
     assert "<th>Description</th>" in text
     # A few sample descriptions appear verbatim.
-    assert "Joined records where every segment" in text
-    assert "inner-join domain" in text
-    assert "excluded from the inner-join" in text
+    assert "Records found in both files with identical content." in text
+    assert "Records found only in File A, not in File B." in text
+    assert "the same key appears more" in text
+    # No jargon leak: "hash" / "multiset" / "inner-join" should not appear in
+    # the operator-facing descriptions.
+    aggregate_section = text.split("<h2>Aggregate counts</h2>")[1].split("</table>")[0]
+    for jargon in ("hash", "multiset", "inner-join", "ADR-019"):
+        assert (
+            jargon not in aggregate_section
+        ), f"jargon {jargon!r} leaked into Aggregate counts descriptions"
 
 
 def test_compare_reports_html_aggregate_counts_link_to_output_files(tmp_path: Path) -> None:
