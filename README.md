@@ -339,6 +339,45 @@ For the full step-by-step explanation of what happens between
 `python -m segment_compare ...` and the 13 output files, see
 **[docs/how-it-works.md](docs/how-it-works.md)**.
 
+## Web UI (Phase 3)
+
+A FastAPI backend wraps the same engine; a Vue 3 + Vite frontend talks to it.
+Run them in **two terminals**.
+
+**1. Backend (FastAPI on `:8000`).** Install the API extra once, then launch:
+
+```bash
+# from the repo root, with your venv active
+pip install -e ".[api]"                 # one-time: fastapi, uvicorn, pydantic
+uvicorn segment_compare.api.main:app --reload --port 8000
+```
+
+`/api/health` should return `{"status":"ok"}`; interactive API docs are at
+`http://localhost:8000/docs`.
+
+**2. Frontend (Vite dev server on `:5173`).** In a second terminal:
+
+```bash
+cd ui
+npm install        # one-time
+npm run dev        # serves http://localhost:5173
+```
+
+Open **http://localhost:5173**. The dev server proxies `/api/*` to the backend
+on `:8000`, so no CORS setup is needed. Pick your two input files, set a key
+field, choose an output directory, and **Save & Run**; the **Results** and
+**Run History** views read the runs back from that output directory.
+
+**Optional config** (`ui/.env`, shown by default — set to `false` to hide a nav
+item; restart `npm run dev` after editing):
+
+```bash
+VITE_SHOW_RESULTS=true
+VITE_SHOW_RUN_HISTORY=true
+```
+
+For a production build of the frontend: `cd ui && npm run build` (emits `ui/dist/`).
+
 ## Repository layout
 
 High-level view of every directory and every file that ships with the
@@ -386,8 +425,12 @@ compare-file/
 │       ├── merger.py                      # fold per-worker outputs
 │       ├── external_sort.py               # chunk-and-merge sort
 │       ├── py.typed                       # PEP-561 marker
-│       └── api/
-│           └── __init__.py                # Phase 3 FastAPI (placeholder)
+│       └── api/                           # Phase 3 FastAPI backend
+│           ├── __init__.py                # exposes `app`
+│           ├── main.py                    # FastAPI app factory + CORS
+│           ├── routes.py                  # /api/* endpoints (configs, runs, report)
+│           ├── models.py                  # pydantic wire schemas
+│           └── storage.py                 # user-config persistence + run-history scan
 ├── tests/
 │   ├── __init__.py
 │   ├── synthetic_data.py                  # generate_pair(num_records, seed, ...)
