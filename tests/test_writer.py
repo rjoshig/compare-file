@@ -10,6 +10,8 @@ import pytest
 from segment_compare.comparator import RecordVerdict, SegmentVerdict
 from segment_compare.parser import Record, Segment, SegmentsConfig
 from segment_compare.writer import (
+    COMPARE_REPORTS_CSV_FILE,
+    COMPARE_REPORTS_HTML_FILE,
     DUPS_A_FILE,
     DUPS_B_FILE,
     KEYMISMATCH_A_FILE,
@@ -22,6 +24,8 @@ from segment_compare.writer import (
     SegmentSummary,
     Summary,
     stamped_filename,
+    write_compare_reports_csv,
+    write_compare_reports_html,
 )
 
 SEGMENTS_CFG = SegmentsConfig(
@@ -313,3 +317,161 @@ def test_writer_path_for_helps_callers_resolve_stamped_paths(tmp_path: Path) -> 
         assert w.path_for(SUMMARY_FILE) == out / "summary_202605272239.json"
     finally:
         w.close()
+
+
+# ---------------------------------------------------------------------------
+# compare_reports.csv + compare_reports.html (ADR-035)
+# ---------------------------------------------------------------------------
+
+
+def _multi_segment_summary(tmp_path: Path) -> Summary:
+    """A Summary with two segments and full config_paths so all sections render."""
+    return Summary(
+        file_a_path=tmp_path / "a.dat",
+        file_b_path=tmp_path / "b.dat",
+        file_a_size_bytes=176,
+        file_b_size_bytes=180,
+        file_a_record_count=4,
+        file_b_record_count=5,
+        keys_in_a_only=1,
+        keys_in_b_only=2,
+        keys_in_both=3,
+        dups_in_a=0,
+        dups_in_b=1,
+        records_matched=2,
+        records_mismatched=1,
+        per_segment=(
+            SegmentSummary("AD01", match_count=2, mismatch_count=0, total_in_a=3, total_in_b=3),
+            SegmentSummary("NM01", match_count=2, mismatch_count=1, total_in_a=3, total_in_b=3),
+        ),
+        start_time="2026-05-28T01:00:00+00:00",
+        end_time="2026-05-28T01:00:05+00:00",
+        elapsed_seconds=5.0,
+        throughput_records_per_sec=0.8,
+        config_paths={
+            "layout_a": "/cfg/layout_file_A.json",
+            "layout_b": "/cfg/layout_file_B.json",
+            "runtime": "/cfg/runtime.json",
+        },
+        config_audit_hash="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        engine_version="0.0.1",
+        filename_stamp="202605280100",
+    )
+
+
+def test_compare_reports_csv_has_section_key_value_header(tmp_path: Path) -> None:
+    path = tmp_path / "reports.csv"
+    write_compare_reports_csv(_multi_segment_summary(tmp_path), path)
+    first = path.read_text(encoding="utf-8").splitlines()[0]
+    assert first == "section,key,value"
+
+
+def test_compare_reports_csv_covers_every_summary_section(tmp_path: Path) -> None:
+    path = tmp_path / "reports.csv"
+    write_compare_reports_csv(_multi_segment_summary(tmp_path), path)
+    text = path.read_text(encoding="utf-8")
+
+    # Every documented section must appear.
+    for section in ("run", "inputs", "counts", "per_segment", "timing", "config_paths"):
+        assert f"\n{section}," in "\n" + text, f"missing section: {section}"
+
+    # Key scalars are pinned with full row content.
+    assert "counts,records_matched,2\n" in text
+    assert "counts,records_mismatched,1\n" in text
+    assert "counts,dups_in_b,1\n" in text
+    assert "inputs,file_a_record_count,4\n" in text
+    assert "inputs,file_b_record_count,5\n" in text
+    assert "run,filename_stamp,202605280100\n" in text
+
+    # Per-segment rows for both segments, all four stats each.
+    for seg in ("AD01", "NM01"):
+        for stat in ("match_count", "mismatch_count", "total_in_a", "total_in_b"):
+            assert f"per_segment,{seg}.{stat}," in text, f"missing per_segment row {seg}.{stat}"
+
+    # Config-paths rows preserve the known layout_a / layout_b / runtime order.
+    rows = text.splitlines()
+    cp_rows = [r for r in rows if r.startswith("config_paths,")]
+    assert cp_rows == [
+        "config_paths,layout_a,/cfg/layout_file_A.json",
+        "config_paths,layout_b,/cfg/layout_file_B.json",
+        "config_paths,runtime,/cfg/runtime.json",
+    ]
+
+
+def test_compare_reports_csv_round_trips_via_csv_module(tmp_path: Path) -> None:
+    """The file must parse back via csv.reader without errors and yield the expected row count."""
+    import csv
+
+    path = tmp_path / "reports.csv"
+    write_compare_reports_csv(_multi_segment_summary(tmp_path), path)
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        rows = list(csv.reader(fh))
+    header, *body = rows
+    assert header == ["section", "key", "value"]
+    # 3 run rows + 6 input rows + 7 count rows + 8 per-segment rows (2 segs × 4 stats)
+    # + 4 timing rows + 3 config-path rows = 31
+    assert len(body) == 31
+
+
+def test_compare_reports_html_is_self_contained_and_well_formed(tmp_path: Path) -> None:
+    path = tmp_path / "reports.html"
+    write_compare_reports_html(_multi_segment_summary(tmp_path), path)
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("<!DOCTYPE html>")
+    assert "</html>" in text
+    # No external CSS or JS — everything must be inline.
+    assert "<link " not in text
+    assert "<script" not in text
+    # Section headings present.
+    for heading in (
+        "Inputs",
+        "Aggregate counts",
+        "Per-segment breakdown",
+        "Timing",
+        "Config provenance",
+    ):
+        assert heading in text, f"missing heading: {heading}"
+
+
+def test_compare_reports_html_renders_metric_values(tmp_path: Path) -> None:
+    path = tmp_path / "reports.html"
+    write_compare_reports_html(_multi_segment_summary(tmp_path), path)
+    text = path.read_text(encoding="utf-8")
+    # Aggregate counts surface as thousand-separated cell contents.
+    assert ">2<" in text  # records_matched
+    assert ">1<" in text  # records_mismatched / others
+    # Segment names from per_segment table.
+    assert "AD01" in text
+    assert "NM01" in text
+    # Throughput formatted with thousands + 1 decimal.
+    assert "0.8 records/s" in text
+    # Filename stamp visible in the subhead.
+    assert "202605280100" in text
+
+
+def test_compare_reports_html_escapes_dangerous_characters(tmp_path: Path) -> None:
+    """Path-like strings must be HTML-escaped so they cannot break the markup."""
+    from dataclasses import replace
+
+    s = replace(
+        _multi_segment_summary(tmp_path),
+        config_paths={"layout_a": "/cfg/<script>alert(1)</script>"},
+    )
+    path = tmp_path / "reports.html"
+    write_compare_reports_html(s, path)
+    text = path.read_text(encoding="utf-8")
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+    assert "<script>alert(1)</script>" not in text
+
+
+def test_outputwriter_finalize_emits_csv_and_html_alongside_summary_json(
+    tmp_path: Path,
+) -> None:
+    """finalize must produce summary.json + compare_reports.csv + compare_reports.html."""
+    out = tmp_path / "out"
+    stamp = "202605280100"
+    with OutputWriter(out, SEGMENTS_CFG, filename_stamp=stamp) as w:
+        w.finalize(_multi_segment_summary(tmp_path))
+    assert (out / stamped_filename(SUMMARY_FILE, stamp)).exists()
+    assert (out / stamped_filename(COMPARE_REPORTS_CSV_FILE, stamp)).exists()
+    assert (out / stamped_filename(COMPARE_REPORTS_HTML_FILE, stamp)).exists()

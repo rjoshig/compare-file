@@ -56,6 +56,8 @@ from segment_compare.writer import (
     SegmentSummary,
     Summary,
     stamped_filename,
+    write_compare_reports_csv,
+    write_compare_reports_html,
     write_summary,
 )
 
@@ -411,8 +413,10 @@ def run_parallel(
         master_writer.path_for("matches.dat").unlink(missing_ok=True)
         master_writer.path_for("mismatches.dat").unlink(missing_ok=True)
         master_writer.path_for("report.csv").unlink(missing_ok=True)
-        # summary.json is written below, after the merge.
+        # summary.json + compare_reports.* are written below, after the merge.
         master_writer.path_for("summary.json").unlink(missing_ok=True)
+        master_writer.path_for("compare_reports.csv").unlink(missing_ok=True)
+        master_writer.path_for("compare_reports.html").unlink(missing_ok=True)
 
     # Build payloads and spawn workers.
     chunks = equal_count_partition(both_keys, workers)
@@ -482,8 +486,15 @@ def run_parallel(
         filename_stamp=filename_stamp,
     )
 
-    # Write summary.json (under the run output dir, stamped).
+    # Write summary.json + the two human reports (ADR-035), all under
+    # the run output dir, all stamped.
     write_summary(summary, output_dir / stamped_filename("summary.json", filename_stamp))
+    write_compare_reports_csv(
+        summary, output_dir / stamped_filename("compare_reports.csv", filename_stamp)
+    )
+    write_compare_reports_html(
+        summary, output_dir / stamped_filename("compare_reports.html", filename_stamp)
+    )
 
     # Optional: clean up the per-worker scratch dir. Leave it for now so
     # debugging is easier; a future ADR can flip this once the path is

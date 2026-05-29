@@ -114,8 +114,8 @@ def test_run_parallel_rejects_zero_workers(tmp_path: Path) -> None:
 
 
 def test_run_parallel_writes_summary_json_with_stamp(tmp_path: Path) -> None:
-    """summary.json must land at the stamped path even though the master
-    writer is closed before the merge happens."""
+    """summary.json + compare_reports.csv/.html must land at stamped paths
+    even though the master writer is closed before the merge happens."""
     config = load_config(CONFIG_DIR)
     out = tmp_path / "out"
     summary = run_parallel(
@@ -126,6 +126,7 @@ def test_run_parallel_writes_summary_json_with_stamp(tmp_path: Path) -> None:
         workers=2,
         run_timestamp=FIXED_TS,
     )
-    summary_path = out / stamped_filename("summary.json", FIXED_STAMP)
-    assert summary_path.exists()
+    assert (out / stamped_filename("summary.json", FIXED_STAMP)).exists()
+    assert (out / stamped_filename("compare_reports.csv", FIXED_STAMP)).exists()
+    assert (out / stamped_filename("compare_reports.html", FIXED_STAMP)).exists()
     assert summary.filename_stamp == FIXED_STAMP

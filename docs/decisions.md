@@ -1031,6 +1031,87 @@ concept.
 
 ---
 
+## ADR-035 — compare_reports.csv + compare_reports.html alongside summary.json
+
+**Status:** accepted
+
+**Context:** `summary.json` is the machine-readable source of truth
+for a run's aggregate metrics — used by the API, the future Phase 4
+service runner, and any downstream tooling that wants a deterministic
+shape. But operators reading run results manually want two friendlier
+views:
+
+1. A **spreadsheet** view they can open in Excel / Google Sheets /
+   Numbers, filter by section, sort by metric, paste into a Slack
+   thread. Flattening JSON by hand for this is tedious and error-prone.
+2. A **browser** view they can email or attach to a ticket — a
+   self-contained HTML page with sectioned tables, no external
+   assets required.
+
+**Decision:** Every run produces two additional output files alongside
+`summary.json`, both stamped per ADR-027:
+
+- `compare_reports_<stamp>.csv` — 3-column long-format CSV with
+  header `section,key,value`. Sections in declaration order:
+  `run`, `inputs`, `counts`, `per_segment`, `timing`, `config_paths`.
+  Per-segment rows use `<segment_name>.<stat>` keys so a single
+  segment's four numbers stay grouped (and the file diffs predictably
+  across identical-input runs).
+- `compare_reports_<stamp>.html` — self-contained HTML report with
+  inline CSS (no `<link>` or `<script>` tags, no external assets).
+  Sectioned tables for Inputs, Aggregate counts, Per-segment
+  breakdown, Timing, and Config provenance. Numbers are
+  thousand-separated and right-aligned with tabular-nums; matched /
+  mismatched counts are color-coded. All path-like and audit-hash
+  strings are HTML-escaped via `html.escape` to prevent markup
+  injection.
+
+Both are produced by:
+- `writer.write_compare_reports_csv(summary, path)` and
+- `writer.write_compare_reports_html(summary, path)`,
+
+called from `OutputWriter.finalize` (single-process path) and from
+`pipeline.run_parallel` immediately after `write_summary` (parallel
+master). The single-process and parallel paths produce identical
+report content given identical aggregate inputs.
+
+The CSV and HTML never carry information that isn't in `summary.json`
+— they're projections, not new data. If you need a metric in the
+reports, add it to `Summary` first; the writers reach in through the
+same dataclass.
+
+**Consequences:**
+
+- Total output file count per run goes from 8 → 10. The full set is
+  now: `matches.dat`, `mismatches.dat`, `keymismatch_A.dat`,
+  `keymismatch_B.dat`, `dups_A.dat`, `dups_B.dat`, `report.csv`,
+  `summary.json`, `compare_reports.csv`, `compare_reports.html`.
+- The two report files are small (a few KB regardless of input size
+  — they don't grow with record count) and written once at run end,
+  so they add no measurable cost to the run.
+- The HTML uses inline CSS only (per the "self-contained" property)
+  — no theming flexibility, but it works without a network or a
+  file-server. If a future need wants theming, the file can become
+  a template lookup later without breaking the contract.
+- 7 new tests pin the behavior:
+  - CSV: header is exactly `section,key,value`; every documented
+    section appears; key scalars + every per-segment stat are
+    present; config_paths preserves the `layout_a` / `layout_b` /
+    `runtime` order; round-trips via `csv.reader`.
+  - HTML: starts with `<!DOCTYPE html>`, ends with `</html>`,
+    contains no `<link>` or `<script>` tags; every section heading is
+    present; metric values render in the body; dangerous characters
+    (`<script>...`) injected into a config path are HTML-escaped.
+  - `OutputWriter.finalize` emits all three (summary.json + the two
+    reports) at the stamped paths.
+- The parallel-pipeline test now asserts the parallel master writes
+  the two reports too.
+- This ADR does not change `summary.json`'s schema or the existing
+  `report.csv` (per-mismatch-row file from ADR-023). Those remain
+  the single sources for their respective use cases.
+
+---
+
 ## ADR-033 — Single per-file layout config replaces segments.json + normalization.json
 
 **Status:** accepted (Stage 1: schema landed); supersedes **ADR-007**

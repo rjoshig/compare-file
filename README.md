@@ -29,7 +29,7 @@ See `docs/architecture.md` for the full spec.
 
 ## What the tool produces
 
-Eight output files per run, written to a run-specific output directory:
+Ten output files per run, written to a run-specific output directory:
 
 | File | Contents |
 |---|---|
@@ -39,8 +39,12 @@ Eight output files per run, written to a run-specific output directory:
 | `keymismatch_B.dat` | Keys only in File B |
 | `dups_A.dat` | Duplicate-key records pulled from File A |
 | `dups_B.dat` | Duplicate-key records pulled from File B |
-| `report.csv` | Per-mismatch rows |
-| `summary.json` | Aggregates, timings, config hash, file metadata |
+| `report.csv` | Per-mismatch rows (one row per mismatched segment-type per record) |
+| `summary.json` | Aggregates, timings, config hash, file metadata (machine-readable source of truth) |
+| `compare_reports.csv` | Same aggregates as `summary.json`, in a 3-column long-format CSV for spreadsheets (ADR-035) |
+| `compare_reports.html` | Same aggregates as `summary.json`, in a self-contained HTML page (inline CSS, no external assets) (ADR-035) |
+
+All filenames are stamped `<base>_YYYYMMDDHHMM.<ext>` (UTC) per ADR-027 — so successive runs in the same directory don't clobber each other.
 
 ## Project status
 
