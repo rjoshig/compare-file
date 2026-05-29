@@ -18,13 +18,25 @@ choices; this document covers the *how* end-to-end.
 > equivalent of `exclude_positions` is a per-field `"exclude": true`
 > in the layout. The byte-level pipeline (parse → index → normalize
 > → hash → compare) described here is unchanged.
+>
+> **Output-layout update (ADR-035 / ADR-036 / ADR-037 / ADR-038):**
+> The run now produces **11 output files** (not 8). Three were added
+> after the original draft of this document: ``compare_reports.csv``
+> and ``compare_reports.html`` (ADR-035, with the HTML overhaul in
+> ADR-036 adding side-by-side layouts, file-linked aggregate counts,
+> a per-key sample, and a Description column with small-font prose
+> under each metric) and ``keys_mismatch_matrix.csv`` (ADR-036,
+> per-key Y/N matrix). Each run lands in its own
+> ``report-YYYY-MM-DD-HH-MM-SS`` subdirectory; files inside use bare
+> names (ADR-037). ``matches.dat`` is now capped at 10 records
+> (ADR-038); ``mismatches.dat`` carries the full set as before.
 
 ---
 
 ## TL;DR
 
-Two large fixed-format files come in, eight output files come out. In
-between:
+Two large fixed-format files come in, 11 output files come out (in
+a per-run subdir). In between:
 
 1. **Parse** — both files are streamed end-to-end; each record's
    bytes are sliced into segments (e.g., `TU4R`, `NM01`, `TR01`,
@@ -457,9 +469,11 @@ segment type in `report.csv` and a side-by-side block in
 
 ## Step 5 — Write outputs
 
-The writer (`writer.py`) owns 8 file handles. All file names carry a
-timestamp suffix so successive runs don't clobber each other
-(ADR-027): `matches_202605281234.dat`, etc.
+The writer (`writer.py`) emits 11 output files per run. Successive
+runs land in their own ``report-YYYY-MM-DD-HH-MM-SS`` subdirectories
+under ``--output-dir`` (ADR-037, supersedes ADR-027's
+filename-stamping rule), so files inside use bare names
+(``matches.dat``, ``summary.json``, ``compare_reports.html``, …).
 
 | Output file              | Contents                                                 |
 |--------------------------|----------------------------------------------------------|

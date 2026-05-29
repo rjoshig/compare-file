@@ -9,6 +9,132 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-28 (reports overhaul + per-run subdir + matches sample + v3 tag)
+
+**Branch:** `dev` → tagged **`v3`** at commit pushed in this session
+**Phase:** 2 (engine extension)
+**Status:** 219 tests passing on pyenv 3.12.7; black, flake8, mypy
+--strict all clean.
+
+### What was completed
+
+A long iteration on the run-output story, driven by operator feedback.
+Five ADRs landed (035 → 038 already accepted in prior commits;
+recapped here in chronological order so the session reads coherently):
+
+- **ADR-035** — `compare_reports.csv` (3-column long-format) +
+  `compare_reports.html` (self-contained HTML with inline CSS)
+  alongside `summary.json`. Same metrics in three views; JSON stays
+  the machine source of truth.
+- **ADR-036** — new `keys_mismatch_matrix.csv` per-key Y/N matrix +
+  HTML overhaul: side-by-side Layouts section (File A | File B with
+  every field's name/length/exclude/key flags), side-by-side Inputs
+  table, Aggregate counts gains a Description column (small grey
+  font, plain English — "Records found in both files with identical
+  content.", etc.) plus a clickable File column linking to each
+  metric's stamped output file, and a Per-key mismatch sample
+  section showing the first 20 rows from the matrix with a link to
+  the full CSV. Per-segment table also gains a small note clarifying
+  Match/Mismatch counts are **record-level** while Total in A/B
+  count every segment instance across all records.
+- **ADR-037** — per-run output subdirectory. Each invocation creates
+  `report-YYYY-MM-DD-HH-MM-SS/` (UTC, seconds-precision) under
+  `--output-dir`; files inside use **bare** names. Two runs in the
+  same minute no longer collide. Supersedes ADR-027 on
+  filename-stamping. `Summary.filename_stamp` now holds the subdir
+  name. Parallel `_workers/` scratch tree lives inside the per-run
+  dir too.
+- **ADR-038** — `matches.dat` is sampled to 10 records;
+  `mismatches.dat` stays full. Single-process gates `write_match` on
+  a counter; parallel post-merge truncates the merged file using
+  the record delimiter as boundary. Aggregate `records_matched`
+  count is still truthful.
+
+Smaller HTML iterations along the way (operator-driven, kept here for
+posterity):
+
+- Header subhead trimmed from "Run … · engine 0.0.1 · audit ab…" to
+  just "Run …".
+- Layout segments table dropped the "Role" column (role info still
+  surfaces in each layout's meta block via "Key segment" / "End
+  segment").
+- Aggregate counts descriptions rewritten in plain English (no
+  "hash", "multiset", "inner-join", "ADR-019" jargon). Sample:
+  "Records in File A where the same key appears more than once.
+  Removed before comparison."
+- Briefly tried `title="…"` tooltips on the metric cells, but the
+  tooltip didn't show reliably in the operator's setup — reverted
+  to a visible Description column with the new `.desc` CSS class
+  (`font-size: 0.82em; color: #555;`).
+- **Per-segment breakdown** gains an intro `<p>` clarifying
+  Match/Mismatch are record-level while Total in A/B count every
+  segment instance across all records (including orphans + dups).
+  The hybrid units in that table had been confusing to readers.
+
+Docs synced:
+
+- `README.md` — every reference to the old
+  `<base>_YYYYMMDDHHMM.<ext>` filename-stamping scheme replaced
+  with the `report-…/` subdir description. "Eight outputs" wording
+  → "11 outputs".
+- `docs/architecture.md` — writer.py row in the module table
+  updated to describe all 11 outputs + per-run subdir.
+- `docs/how-it-works.md` — top-of-file callout now also covers
+  ADR-035 / 036 / 037 / 038 in addition to the earlier ADR-033 note;
+  the inline file-naming example was updated to bare names + per-run
+  subdir.
+- `examples/README.md` — note about per-run subdir replaces the
+  old "matches_<stamp>.dat" line.
+
+### What's pending
+
+Phase 3 kickoff (FastAPI scaffolding) — unchanged. ADR-035 → ADR-038
+were engine-internal output-layout changes; the consumer surface
+(`pipeline.run` / `pipeline.run_parallel`) is unchanged except for
+where the files land on disk.
+
+A future ADR could make ADR-038's sample size configurable via
+`runtime.json::matches_sample_size` (and possibly a CLI override).
+For now the cap is a constant `MATCHES_SAMPLE_SIZE = 10`.
+
+### Blockers
+
+None.
+
+### Decisions captured this session
+
+- **ADR-035**: CSV + HTML reports alongside summary.json.
+- **ADR-036**: per-key matrix CSV + HTML overhaul.
+- **ADR-037**: per-run output subdirectory; bare filenames inside.
+  Supersedes ADR-027 on filename stamping.
+- **ADR-038**: matches.dat sampled to 10; mismatches.dat stays full.
+
+### Next concrete action
+
+Open `docs/phase-3.md` and start the FastAPI scaffolding. The HTML
+report (`compare_reports.html`) gives the Phase 3 web UI a free
+hand-rolled prototype to crib from for visual conventions.
+
+### Notes for future me
+
+- `RUN_DIR_FORMAT = "report-%Y-%m-%d-%H-%M-%S"`. Seconds-precision
+  picks up where ADR-027's minute-precision had collision risk; if
+  someone re-launches the engine inside the same wall-clock second
+  on the same `--output-dir`, the second invocation overwrites the
+  first. Acceptable for the human-driven case; the Phase 4 service
+  runner can add monotonic suffixes if it ever needs them.
+- The Aggregate counts `Description` column carries plain-English
+  prose with no jargon. Tests assert no "hash" / "multiset" /
+  "inner-join" / "ADR-019" leak into that section. If you add a new
+  description, keep the writing style consistent (simple English,
+  no engineering terms).
+- `Summary.filename_stamp` is now misnamed — its value is the
+  run-dir name, not a filename suffix. Renaming to `run_dir_name`
+  would be a `summary.json` schema break (external tooling reads
+  the field); leaving the field name alone for now.
+
+---
+
 ## Session: 2026-05-28 (ADR-034: context-sensitive segment aliasing)
 
 **Branch:** `dev`

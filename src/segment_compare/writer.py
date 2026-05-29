@@ -887,7 +887,16 @@ def _render_per_segment(summary: "Summary", e: "Any") -> str:
         f"<td class='num'>{seg.total_in_b:,}</td></tr>"
         for seg in summary.per_segment
     )
+    note = (
+        "<p class='sample-note'>"
+        "Match / Mismatch are <strong>record-level</strong>: how many joined records had this "
+        "segment type fully agreeing between A and B (Match) vs differing on at least one "
+        "instance (Mismatch). Total in A / B count every instance of the segment across all "
+        "records in each file (including orphans and duplicates)."
+        "</p>"
+    )
     return (
+        f"{note}"
         "<table>"
         "<tr><th>Segment</th><th class='num'>Match</th><th class='num'>Mismatch</th>"
         "<th class='num'>Total in A</th><th class='num'>Total in B</th></tr>"

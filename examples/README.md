@@ -127,8 +127,10 @@ directory must produce:
 | `report.csv` | 3 rows + header | NM01 mismatch + TR01 content mismatch + TR01 count mismatch |
 | `summary.json` | aggregates | as usual |
 
-Output filenames are stamped with the run start time in UTC, e.g.
-`matches_202605280358.dat`. See **ADR-027**.
+Outputs land inside a per-run subdirectory
+`report-YYYY-MM-DD-HH-MM-SS/` under `--output-dir`, with bare
+filenames (`matches.dat`, `summary.json`, etc.). See **ADR-037**
+(supersedes ADR-027's filename-stamping rule).
 
 ## How the engine is wired for this fixture
 

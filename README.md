@@ -103,8 +103,7 @@ python -m segment_compare \
     --output-dir results/
 ```
 
-Output files are timestamped `<base>_YYYYMMDDHHMM.<ext>` (UTC) so
-successive runs don't clobber each other — see **ADR-027**.
+Each invocation creates its own subdirectory `report-YYYY-MM-DD-HH-MM-SS` (UTC, seconds-precision) under `--output-dir`; all output files land inside it with bare names. Successive runs never clobber each other — see **ADR-037** (supersedes the older filename-stamping rule from ADR-027).
 
 ### Parallelism is configurable
 
@@ -160,9 +159,7 @@ python -m segment_compare --config-dir /etc/segment-compare/strict/ ...
 
 #### `--output-dir` (required for runs)
 
-Directory the eight output files land in. Created if missing.
-Filenames are stamped `<base>_YYYYMMDDHHMM.<ext>` (UTC) so re-runs
-sit beside each other (ADR-027).
+Parent directory for run outputs. Created if missing. Each invocation creates its own `report-YYYY-MM-DD-HH-MM-SS/` subdirectory inside it; all 11 output files (bare-named) land in that subdir, so re-runs sit beside each other as independent folders (ADR-037).
 
 ```bash
 python -m segment_compare ... --output-dir /var/log/segcmp/$(date +%Y%m%d)/
@@ -337,7 +334,7 @@ python -m segment_compare --log-level DEBUG \
 ```
 
 For the full step-by-step explanation of what happens between
-`python -m segment_compare ...` and the eight output files, see
+`python -m segment_compare ...` and the 11 output files, see
 **[docs/how-it-works.md](docs/how-it-works.md)**.
 
 ## Repository layout
@@ -380,7 +377,7 @@ compare-file/
 │       ├── normalizer.py                  # position + composite dispatch
 │       ├── hasher.py                      # blake2b + builtin behind a Protocol
 │       ├── comparator.py                  # per-record multiset hash compare
-│       ├── writer.py                      # eight output files + Summary
+│       ├── writer.py                      # 11 output files + Summary + report writers
 │       ├── pipeline.py                    # run() / run_parallel() / dry_run()
 │       ├── partitioner.py                 # equal-count key partitioning
 │       ├── worker.py                      # subprocess entry point

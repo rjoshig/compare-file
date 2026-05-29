@@ -50,7 +50,7 @@
 | `normalizer.py` | Position-based strip + exclude (Phase 1). Field-based layout (Phase 2). Produces canonical segment bytes for hashing. |
 | `hasher.py` | Hash a segment's normalized bytes. Default `blake2b` (16-byte digest), switchable to built-in `hash()`. |
 | `comparator.py` | Multiset (`collections.Counter`) comparison per segment type within a key. Emits match/mismatch verdicts. |
-| `writer.py` | Writes the eight output files (matches, mismatches, keymismatch_A/B, dups_A/B, report.csv, summary.json). |
+| `writer.py` | Writes the 11 output files (matches sampled to 10, mismatches, keymismatch_A/B, dups_A/B, report.csv, summary.json, compare_reports.csv, compare_reports.html, keys_mismatch_matrix.csv). Each run lands in its own `report-…` subdir (ADR-037). |
 | `pipeline.py` | Orchestrates: index-build → dup filter → inner-join iteration → compare → write. Single function `run(file_a, file_b, config, output_dir)`. |
 | `config.py` | Loads and validates the three JSON config files. Computes a SHA-256 of the merged config for the run audit trail. |
 | `__main__.py` | CLI (argparse), wraps `pipeline.run`. |
