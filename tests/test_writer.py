@@ -508,6 +508,20 @@ def test_compare_reports_html_layouts_section_is_side_by_side(tmp_path: Path) ->
     assert text.count("ENDS") >= 4
 
 
+def test_compare_reports_html_aggregate_counts_has_description_column(tmp_path: Path) -> None:
+    """Each count row carries a short description explaining the metric."""
+    path = tmp_path / "reports.html"
+    summary = _multi_segment_summary(tmp_path)
+    write_compare_reports_html(_reports(summary, tmp_path), path)
+    text = path.read_text(encoding="utf-8")
+    # Column header present.
+    assert "<th>Description</th>" in text
+    # A few sample descriptions appear verbatim.
+    assert "Joined records where every segment" in text
+    assert "inner-join domain" in text
+    assert "excluded from the inner-join" in text
+
+
 def test_compare_reports_html_aggregate_counts_link_to_output_files(tmp_path: Path) -> None:
     """Each count metric's row must include a clickable link to its stamped output file."""
     path = tmp_path / "reports.html"

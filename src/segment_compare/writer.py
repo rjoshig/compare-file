@@ -785,15 +785,66 @@ def _render_inputs_side_by_side(summary: "Summary", e: "Any") -> str:
 
 
 def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
-    """Counts table with a clickable file-link column (ADR-036)."""
+    """Counts table with a description + clickable file-link columns (ADR-036)."""
     rows = (
-        ("Records matched", summary.records_matched, "match", "records_matched"),
-        ("Records mismatched", summary.records_mismatched, "mismatch", "records_mismatched"),
-        ("Keys in both", summary.keys_in_both, "", None),
-        ("Keys only in A", summary.keys_in_a_only, "", "keys_in_a_only"),
-        ("Keys only in B", summary.keys_in_b_only, "", "keys_in_b_only"),
-        ("Duplicate keys in A", summary.dups_in_a, "", "dups_in_a"),
-        ("Duplicate keys in B", summary.dups_in_b, "", "dups_in_b"),
+        (
+            "Records matched",
+            "Joined records where every segment's hash multiset agreed between A and B.",
+            summary.records_matched,
+            "match",
+            "records_matched",
+        ),
+        (
+            "Records mismatched",
+            "Joined records with at least one segment-type content or count difference.",
+            summary.records_mismatched,
+            "mismatch",
+            "records_mismatched",
+        ),
+        (
+            "Keys in both",
+            (
+                "Distinct keys present in both files after duplicates "
+                "were segregated — the inner-join domain."
+            ),
+            summary.keys_in_both,
+            "",
+            None,
+        ),
+        (
+            "Keys only in A",
+            "Keys present in File A but absent from File B (orphans, no comparison possible).",
+            summary.keys_in_a_only,
+            "",
+            "keys_in_a_only",
+        ),
+        (
+            "Keys only in B",
+            "Keys present in File B but absent from File A (orphans, no comparison possible).",
+            summary.keys_in_b_only,
+            "",
+            "keys_in_b_only",
+        ),
+        (
+            "Duplicate keys in A",
+            (
+                "Records from File A whose key appeared more than once; "
+                "excluded from the inner-join (ADR-019)."
+            ),
+            summary.dups_in_a,
+            "",
+            "dups_in_a",
+        ),
+        (
+            "Duplicate keys in B",
+            (
+                "Records from File B whose key appeared more than once; "
+                "excluded from the inner-join (ADR-019)."
+            ),
+            summary.dups_in_b,
+            "",
+            "dups_in_b",
+        ),
     )
 
     def _file_cell(metric_key: "str | None") -> str:
@@ -807,13 +858,14 @@ def _render_aggregate_counts(summary: "Summary", stamp: str, e: "Any") -> str:
 
     rows_html = "".join(
         f"<tr><td class='{css}'>{label}</td>"
+        f"<td>{e(desc)}</td>"
         f"<td class='num'>{val:,}</td>"
         f"<td>{_file_cell(metric_key)}</td></tr>"
-        for label, val, css, metric_key in rows
+        for label, desc, val, css, metric_key in rows
     )
     return (
         "<table>"
-        "<tr><th>Metric</th><th class='num'>Value</th><th>File</th></tr>"
+        "<tr><th>Metric</th><th>Description</th><th class='num'>Value</th><th>File</th></tr>"
         f"{rows_html}"
         "</table>"
     )
