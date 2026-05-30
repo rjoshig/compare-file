@@ -1845,3 +1845,54 @@ existing UI.
 **Consequences:** two UIs to keep working against one API contract; `ui2` is the
 visual/dashboard surface, `ui/` remains the reference implementation. Long runs
 still block (no SSE) — `ui2` shows a spinner, matching current behavior.
+
+## ADR-045 — Multi-user auth, admin user management, and per-user isolation (Phase 7)
+
+**Status:** accepted (design); implementation deferred to Phase 7
+
+**Context:** The operator wants the tool usable by **multiple concurrent users
+on a single Linux host**, each running their own compares. Today the FastAPI
+backend has no auth, saved configs are a flat global `user_configs/` namespace,
+and the SQLite `runs`/`configs` tables (ADR-043) are global — so any caller sees
+and overwrites everyone's work. The ask: per-user login, a *single* admin-only
+page to create users + issue/reset passwords, a forced password change on first
+login, and **no RBAC beyond user/admin**. Kept intentionally light.
+
+**Decision:**
+
+1. **Cookie-based server sessions, not JWT.** A `sessions` table in `api/db.py`
+   holds opaque session ids → user; the browser gets an `httpOnly`+`Secure`+
+   `SameSite=Lax` cookie. Simpler to revoke, nothing sensitive in the browser,
+   and — stored in SQLite — it is **shared across gunicorn workers** (in-memory
+   sessions would not be). Passwords are **bcrypt** hashes (`passlib[bcrypt]`,
+   the one new dependency; the engine stays stdlib-only). JWT was rejected:
+   refresh/revocation/XSS overhead for no benefit at this scale.
+2. **Login lives only in `ui2/` (Next.js).** The Vue `ui/` is legacy (ADR-044)
+   and is **not** updated for auth; it stops working against the authed API.
+3. **A single admin-only page.** Admin endpoints (`/api/admin/users…`) let an
+   admin create a user (server **generates** the initial password, shown once),
+   reset/regenerate it (sets `must_change_password`), and enable/disable. The
+   `ui2` `/admin` route + sidebar entry are gated on `is_admin`; non-admins get
+   403 and never see it. The **first admin is env-seeded**
+   (`SEGCMP_ADMIN_USER`/`SEGCMP_ADMIN_PASSWORD`) on startup with
+   `must_change_password=true`. No heavier admin console.
+4. **Forced first-login password change.** `must_change_password` blocks every
+   endpoint except `auth/me` / `auth/change-password` / `auth/logout` until the
+   user sets their own password.
+5. **Per-user isolation (login alone is insufficient).** Configs are namespaced
+   `user_configs/<username>/<config>/`; `runs`/`configs` gain a `user_id`; every
+   read filters by the logged-in user and every write stamps the owner.
+   `backfill_from_disk` assigns legacy rows to a default owner.
+6. **Typed server paths are kept (trusted-user model).** No upload/sandbox work
+   this phase — `file_a`/`file_b`/`output_dir` and `/api/browse` remain operator-
+   typed absolute paths (now auth-gated). This assumes **all logged-in users are
+   trusted on the host**; a future phase can add per-user upload + a managed
+   results root if untrusted users are introduced.
+
+**Consequences:** the API gains an auth layer and the DB gains `users`/`sessions`
+tables + ownership columns; `ui2` gains login, change-password, and a one-page
+admin screen, while `ui/` is left behind. Concurrency at the hosting layer is
+gunicorn-workers-behind-nginx with TLS (required for `Secure` cookies); runs stay
+synchronous and block a worker, so worker count must be sized for expected
+concurrent runs. The trusted-path model is a deliberate, documented limitation,
+not an oversight. Full plan in [docs/phase-7.md](phase-7.md).

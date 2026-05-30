@@ -38,12 +38,15 @@ key field, `GET /api/configs/{name}` reloaded it faithfully; unknown name 404s.
 ### What's pending
 
 - Browser-level walkthrough of ui2 (optional Playwright) still outstanding.
-- **Phase 7 (proposed): multi-user hosting + auth.** Operator wants the tool
-  usable by concurrent users on a Linux host: per-user login, a single small
-  admin-only page to create users + issue initial passwords + reset/regenerate
-  passwords, and forced password change on first login. No broader RBAC (just
-  user vs admin). Discussed this session; **doc not yet written** — agree on the
-  approach first, then write `docs/phase-7.md` + ADR(s) + phase-plan row.
+- **Phase 7 (planned): multi-user hosting + auth — doc written this session.**
+  Discussed and agreed the shape with the operator: cookie-based server sessions
+  + bcrypt, login/admin in `ui2/` only (Vue `ui/` becomes legacy), a single
+  admin-only page (create user + issue/reset generated passwords), forced
+  password change on first login, and **per-user isolation** of saved configs +
+  run history. Typed server paths kept (trusted-user model) — no upload/sandbox.
+  Wrote `docs/phase-7.md`, **ADR-045** in `decisions.md`, and the Phase 7 row +
+  section in `phase-plan.md` (Phase 6 reserved/unallocated); refreshed the
+  `CLAUDE.md` phase table. **Not yet implemented** — planning only.
 - Phase 4 (service mode) and Phase 5 (parallelism efficiency) still not started.
 
 ### Blockers
@@ -52,9 +55,10 @@ None.
 
 ### Next concrete action
 
-Agree on the Phase 7 auth/hosting approach with the operator, then write
-`docs/phase-7.md`, add ADR(s) in `decisions.md`, and add the Phase 7 row to
-`phase-plan.md`. Otherwise pick up Phase 4 or Phase 5.
+When Phase 7 is prioritized, implement per `docs/phase-7.md`: add `users` /
+`sessions` tables + ownership columns in `api/db.py`, the auth guard + admin
+endpoints in `routes.py`, `passlib[bcrypt]` to `pyproject.toml`, and the login /
+change-password / `/admin` screens in `ui2/`. Otherwise pick up Phase 4 or 5.
 
 ---
 

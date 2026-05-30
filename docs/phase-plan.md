@@ -12,6 +12,8 @@ acceptance criteria are met.
 | 3 | Web UI (Vue.js + FastAPI; + Next.js `ui2/` + SQLite history) | in progress | [docs/phase-3.md](phase-3.md) |
 | 4 | Scheduled service mode | not started | [docs/phase-4.md](phase-4.md) |
 | 5 | Parallelism & throughput efficiency | planned | [docs/phase-5.md](phase-5.md) |
+| 6 | _(reserved — unallocated)_ | — | — |
+| 7 | Multi-user hosting & authentication | planned | [docs/phase-7.md](phase-7.md) |
 
 ## Phase 0 — Scaffolding (this commit)
 
@@ -136,3 +138,37 @@ overhead; tune `parallel_workers` / chunk size; optional streaming merge.
   worker count; toolchain clean; an ADR records the approach.
 
 See [docs/phase-5.md](phase-5.md).
+
+## Phase 6 — reserved
+
+Intentionally unallocated. Phase 7 was numbered per operator request, leaving
+Phase 6 as a slot for future work that sequences before multi-user hosting.
+
+## Phase 7 — Multi-user hosting & authentication
+
+**Goal:** make the tool safely usable by multiple concurrent users on one Linux
+host — per-user login, a single admin-only page to create users and issue/reset
+passwords, forced password change on first login, and per-user isolation of saved
+configs and run history. No RBAC beyond user/admin.
+
+**Scope:**
+- Cookie-based server sessions + bcrypt; `users` / `sessions` tables in the
+  SQLite index; auth guard on all `/api/*` (ADR-045).
+- Admin-only user management endpoints + a single `ui2` `/admin` page;
+  env-seeded bootstrap admin.
+- Forced first-login password change (`must_change_password`).
+- Per-user isolation: namespace `user_configs/<username>/`, add `user_id` to the
+  `runs`/`configs` tables, filter every read by the logged-in user.
+
+**Out of scope:** file upload / filesystem sandboxing (typed server paths kept —
+trusted-user model), roles beyond user/admin, SSO/LDAP/OAuth, self-service email
+reset, auth for the Vue `ui/`.
+
+**Exit criteria:**
+- Unauthenticated requests 401; login/logout manage a session cookie; admin can
+  create/reset users; first login forces a password change; the admin page is
+  admin-only; each user sees only their own configs + history; bcrypt hashes +
+  SQLite sessions + `httpOnly`/`Secure` cookies; tests + toolchain clean; an ADR
+  records the approach.
+
+See [docs/phase-7.md](phase-7.md).
