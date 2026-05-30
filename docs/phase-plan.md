@@ -9,8 +9,9 @@ acceptance criteria are met.
 | 0 | Scaffolding | **complete** | (this commit) |
 | 1 | Core engine (POC) | **complete** | [docs/phase-1.md](phase-1.md) |
 | 2 | Production scale + field-level config | **complete** | [docs/phase-2.md](phase-2.md) |
-| 3 | Web UI (Vue.js + FastAPI) | not started | [docs/phase-3.md](phase-3.md) |
+| 3 | Web UI (Vue.js + FastAPI; + Next.js `ui2/` + SQLite history) | in progress | [docs/phase-3.md](phase-3.md) |
 | 4 | Scheduled service mode | not started | [docs/phase-4.md](phase-4.md) |
+| 5 | Parallelism & throughput efficiency | planned | [docs/phase-5.md](phase-5.md) |
 
 ## Phase 0 — Scaffolding (this commit)
 
@@ -82,11 +83,14 @@ See [docs/phase-2.md](phase-2.md).
 a browser.
 
 **Scope:**
-- Vue.js 3 SPA in `ui/`.
+- Vue.js 3 SPA in `ui/` (shipped).
 - FastAPI backend in `src/segment_compare/api/`.
 - Six screens: Run Configuration, Segment Selection, Field Configuration,
   Run Execution, Results Dashboard, Run History.
-- SQLite for run history.
+- SQLite for run history (ADR-043) — realized as a dual-written index
+  alongside the ADR-041 directory-driven history; powers the `ui2/` dashboard.
+- A second, visual UI in `ui2/` (Next.js + Tailwind + Recharts, ADR-044):
+  Dashboard, Field Comparator, History, Config.
 - Dry-run mode, sample record inspection, normalization rule tester.
 
 **Exit criteria:**
@@ -114,3 +118,21 @@ files in a watched directory.
 - Exit codes match the published table.
 
 See [docs/phase-4.md](phase-4.md).
+
+## Phase 5 — Parallelism & throughput efficiency
+
+**Goal:** make the existing parallel engine *efficient* at the 3M-record
+target. Phase 2 shipped working parallelism but measured only 1.84× at 4
+workers; Phase 5 closes that gap (profiling, size-aware partitioning /
+work-stealing, lower IPC/serialization overhead, memory-mapped reads, tuned
+defaults) without changing output semantics.
+
+**Scope:** profile the pipeline at scale; improve load balancing and per-worker
+overhead; tune `parallel_workers` / chunk size; optional streaming merge.
+
+**Exit criteria:**
+- A reproducible 3M-record benchmark (extends `docs/benchmarks/phase-2.md`).
+- Measurable speedup over the Phase-2 baseline; output byte-identical at every
+  worker count; toolchain clean; an ADR records the approach.
+
+See [docs/phase-5.md](phase-5.md).

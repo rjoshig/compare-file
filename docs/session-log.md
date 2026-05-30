@@ -9,6 +9,73 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-30 (ui2 — Next.js dashboard + SQLite history index; Phase 5 planned)
+
+**Branch:** `claude/phase-3-ui2-nextjs` (cut from `origin/dev`)
+**Phase:** 3 (web UI) — second UI + SQLite history; plus Phase 5 doc
+**Status:** Shipped + verified end-to-end. 247 Python tests pass (was 232;
++15 new); `black` / `flake8` / `python -m mypy src` clean; `ui2` `tsc --noEmit`
+and `next build` clean. Live smoke: backend on :8000 + `ui2` on :3000 — saved a
+config, ran the samples, and confirmed `/api/dashboard` + `/api/history` +
+`/runs/[id]` reflect the run (incl. per-segment mismatch rollup) through the
+Next.js `/api` proxy. Vue `ui/` untouched.
+
+### Heads-up on branching
+
+The harness assigned `claude/python-parallelism-multicore-KCUKA`, but that branch
+is a stale **ancestor of `dev`** (0 ahead / 34 behind) and predates all the
+Phase-2/3 work. Per the operator, work was done on a **new branch off `dev`**
+(`claude/phase-3-ui2-nextjs`). Do not resurrect the KCUKA branch.
+
+### What was completed
+
+- **SQLite index (ADR-043).** New `src/segment_compare/api/db.py` (stdlib
+  `sqlite3`, no new dep): `runs` / `run_segments` / `configs` tables, WAL,
+  schema created via FastAPI lifespan. Dual-written from `POST /api/configs`
+  (`record_config`) and `POST /api/runs` (`record_run`, which reads the run's
+  `summary.json`). All writes are best-effort/non-fatal — the filesystem
+  (ADR-041) stays the source of truth; `backfill_from_disk` can reseed. New
+  endpoints: `GET /api/dashboard`, `GET /api/history?limit=&offset=&q=`,
+  `GET /api/history/{id}`. `:3000` added to dev CORS. Tests: `tests/test_api_db.py`
+  (unit) + `tests/test_api_dashboard.py` (TestClient E2E against the samples).
+- **`ui2/` (ADR-044).** Next.js (App Router) + TS + Tailwind + Recharts +
+  next-themes; lightweight shadcn-style local UI primitives (no Radix). Sidebar:
+  Dashboard · Field Comparator · History · Config. Field Comparator shows every
+  segment with its size (key segment TU4R first), per-field **Exclude** checkbox
+  **off by default** (sends explicit `exclude_overrides=false` so template
+  excludes can't silently drop fields), **no exclude control on the key field**,
+  add-field on the key segment, key-field picker, byte ruler. Runs via existing
+  `POST /api/configs` + `POST /api/runs`. Dev proxies `/api/*` → `:8000`.
+- **Docs:** ADR-043 + ADR-044 in `decisions.md`; `phase-3.md`, `phase-plan.md`
+  (Phase 3 updated; **Phase 5** added), `architecture.md` updated. New
+  `docs/phase-5.md` captures the deferred **parallelism-efficiency** work
+  (Phase 2 shipped parallelism at 1.84×@4w; Phase 5 = profile + load-balance +
+  cut IPC to approach the 3M-record target). `.gitignore`: `*.db*`, `.next/`,
+  `*.tsbuildinfo`, `.env.local`.
+
+### What's pending
+
+- Browser (not just HTTP) walkthrough of `ui2` interactions; optional Playwright.
+- Config page currently lists saved configs and "opens" them by prefilling the
+  name in the comparator (the editor starts fresh). A `GET /api/configs/{name}`
+  returning the stored `payload_json` would let `ui2` repopulate the editor —
+  the DB already stores it. Nice-to-have.
+- Phase 5 is documented only — not started.
+
+### Blockers
+
+None. (Env quirks handled: this box's `mypy` on PATH can't see fastapi — use
+`python -m mypy src`; bleeding-edge starlette needs `httpx2` for TestClient.)
+
+### Next concrete action
+
+Push `claude/phase-3-ui2-nextjs`. If the operator wants the editor to reload a
+saved config's field choices, add `GET /api/configs/{name}` (return
+`configs.payload_json`) and wire it into `ui2`'s Config → comparator "Open".
+Otherwise pick up Phase 4 (service mode) or Phase 5 (parallelism efficiency).
+
+---
+
 ## Session: 2026-05-29 (ADR-041 — Run History (dir-driven), nav .env toggles, report polish)
 
 **Branch:** `dev`
