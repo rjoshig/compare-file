@@ -60,6 +60,21 @@ When Phase 7 is prioritized, implement per `docs/phase-7.md`: add `users` /
 endpoints in `routes.py`, `passlib[bcrypt]` to `pyproject.toml`, and the login /
 change-password / `/admin` screens in `ui2/`. Otherwise pick up Phase 4 or 5.
 
+### Handoff (for the next Claude CLI session)
+
+- **Integration branch is `dev`.** This work is in a PR from
+  `claude/phase-3-ui2-nextjs` → `dev`; everything funnels through `dev`.
+  **Start your next branch from `dev`** (`git fetch origin && git switch -c
+  <new-branch> origin/dev`) once this PR is merged, so you pick up the
+  config-reload + Phase 7 planning already landed here.
+- **What's already on this branch (in the PR):** (1) `GET /api/configs/{name}`
+  + ui2 editor reload — shipped, tested, green; (2) Phase 7 planning docs only
+  (`docs/phase-7.md`, ADR-045, `phase-plan.md`, `CLAUDE.md` table) — **no Phase 7
+  code yet**.
+- **Resume point:** Phase 7 is agreed and documented but unimplemented. Pick it
+  up from `docs/phase-7.md` / ADR-045, or take Phase 4 / Phase 5. Re-read this
+  entry and `docs/phase-plan.md` before starting.
+
 ---
 
 ## Session: 2026-05-30 (ui2 — Next.js dashboard + SQLite history index; Phase 5 planned)
