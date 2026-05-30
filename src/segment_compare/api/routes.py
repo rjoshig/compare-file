@@ -9,8 +9,11 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Path as PathParam
 from fastapi.responses import FileResponse
 
-from segment_compare.api import storage
+from segment_compare.api import db, storage
 from segment_compare.api.models import (
+    DashboardResponse,
+    HistoryListResponse,
+    RunDetailResponse,
     RunHistoryEntry,
     RunHistoryListResponse,
     RunRequest,
@@ -49,6 +52,8 @@ def save_config(body: SaveConfigRequest) -> dict[str, str]:
         name = storage.save_config(body.name, body.file_a, body.file_b)
     except storage.StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Mirror into the SQLite index for ui2 (best-effort, non-fatal).
+    db.record_config(name, body)
     return {"name": name}
 
 
@@ -56,6 +61,20 @@ def save_config(body: SaveConfigRequest) -> dict[str, str]:
 def list_configs() -> SavedConfigListResponse:
     """List saved configs (excludes ``_last_unsaved``)."""
     return SavedConfigListResponse(configs=storage.list_configs())
+
+
+@router.get("/configs/{name}", response_model=SaveConfigRequest)
+def get_config(name: str) -> SaveConfigRequest:
+    """Return one saved config in UI (wire) shape so the editor can reopen it.
+
+    Reconstructs the per-side field choices (excludes, added key fields, key
+    field, sort) from the on-disk engine layouts (ADR-041 source of truth), so
+    it works for every saved config — including ones predating the SQLite index.
+    """
+    try:
+        return storage.load_saved_config(name)
+    except storage.StorageError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/runs", response_model=RunResponse)
@@ -88,10 +107,18 @@ def run_compare(body: RunRequest) -> RunResponse:
     run_dir_name = summary.filename_stamp
     run_dir_path = output_dir / run_dir_name
     token = _encode_run_token(run_dir_path)
+    report_url = f"/api/runs/{token}/report"
+    # Index the completed run for ui2's history/dashboard (best-effort).
+    db.record_run(
+        run_dir_path,
+        config_name=body.config_name,
+        output_dir=str(output_dir),
+        report_url=report_url,
+    )
     return RunResponse(
         run_dir_name=run_dir_name,
         run_dir_path=str(run_dir_path),
-        report_url=f"/api/runs/{token}/report",
+        report_url=report_url,
         records_matched=summary.records_matched,
         records_mismatched=summary.records_mismatched,
         keys_in_a_only=summary.keys_in_a_only,
@@ -117,6 +144,44 @@ def list_runs(output_dir: str | None = None) -> RunHistoryListResponse:
         token = _encode_run_token(Path(h["run_dir_path"]))
         runs.append(RunHistoryEntry(report_url=f"/api/runs/{token}/report", **h))
     return RunHistoryListResponse(runs=runs)
+
+
+@router.get("/dashboard", response_model=DashboardResponse)
+def dashboard(recent: int = 5) -> DashboardResponse:
+    """Aggregates for the ui2 dashboard, sourced from the SQLite index.
+
+    Returns the last run, the newest ``recent`` runs, headline totals across
+    all runs, and total mismatches grouped by segment.
+    """
+    return DashboardResponse.model_validate(db.dashboard_stats(recent_n=recent))
+
+
+@router.get("/history", response_model=HistoryListResponse)
+def history(limit: int = 25, offset: int = 0, q: str | None = None) -> HistoryListResponse:
+    """Full, paginated, searchable run history from the SQLite index.
+
+    Unlike ``GET /api/runs`` (which scans one output dir for the newest five),
+    this spans every indexed run and supports ``q`` substring search over the
+    file names and config name.
+    """
+    runs, total = db.list_runs(limit=limit, offset=offset, search=q)
+    return HistoryListResponse.model_validate(
+        {
+            "runs": runs,
+            "total": total,
+            "limit": max(1, min(int(limit), 200)),
+            "offset": max(0, int(offset)),
+        }
+    )
+
+
+@router.get("/history/{run_id}", response_model=RunDetailResponse)
+def history_detail(run_id: int) -> RunDetailResponse:
+    """One indexed run plus its per-segment rollup."""
+    run = db.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id} not found in index")
+    return RunDetailResponse.model_validate(run)
 
 
 @router.get("/browse")

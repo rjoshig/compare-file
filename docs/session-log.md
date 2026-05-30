@@ -9,6 +9,141 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-30 (ui2 — reload a saved config into the editor)
+
+**Branch:** `claude/phase-3-ui2-nextjs`
+**Phase:** 3 (web UI) — closing the ui2 config-reload gap
+**Status:** Shipped + verified. 251 Python tests pass (was 247; +4 new);
+`black` / `flake8` / `python -m mypy src` clean; `ui2` `tsc --noEmit` +
+`next build` clean. Live HTTP smoke: saved a config with excludes + an added
+key field, `GET /api/configs/{name}` reloaded it faithfully; unknown name 404s.
+
+### What was completed
+
+- **`GET /api/configs/{name}`** (`routes.py`) returns a saved config in UI/wire
+  shape so the editor can reopen it. Backed by new
+  `storage.load_saved_config()` + `_reconstruct_side()` which *reverse* the
+  UI→engine projection in `_build_engine_layout`: it reads the on-disk engine
+  layouts (ADR-041 source of truth) and rebuilds per-field exclude choices,
+  fields added to the key segment, the chosen key field, strip/RDW/sort blocks,
+  and operator-declared aliases. Works for every saved config, including ones
+  predating the SQLite index (so no dependence on `configs.payload_json`).
+- **ui2 wiring:** `api.getConfig()`, `editor.sideConfigToState()` (inverse of
+  `buildSideConfig`), and the comparator page now loads `?config=NAME` into both
+  sides (Config → "Open" and History → "Re-run" now repopulate the editor, not
+  just the name). Falls back to empty defaults if the config can't be read.
+- **Tests:** `test_api_storage.py` round-trip + missing-config cases;
+  `test_api_dashboard.py` endpoint 200/404 cases.
+
+### What's pending
+
+- Browser-level walkthrough of ui2 (optional Playwright) still outstanding.
+- **Phase 7 (planned): multi-user hosting + auth — doc written this session.**
+  Discussed and agreed the shape with the operator: cookie-based server sessions
+  + bcrypt, login/admin in `ui2/` only (Vue `ui/` becomes legacy), a single
+  admin-only page (create user + issue/reset generated passwords), forced
+  password change on first login, and **per-user isolation** of saved configs +
+  run history. Typed server paths kept (trusted-user model) — no upload/sandbox.
+  Wrote `docs/phase-7.md`, **ADR-045** in `decisions.md`, and the Phase 7 row +
+  section in `phase-plan.md` (Phase 6 reserved/unallocated); refreshed the
+  `CLAUDE.md` phase table. **Not yet implemented** — planning only.
+- Phase 4 (service mode) and Phase 5 (parallelism efficiency) still not started.
+
+### Blockers
+
+None.
+
+### Next concrete action
+
+When Phase 7 is prioritized, implement per `docs/phase-7.md`: add `users` /
+`sessions` tables + ownership columns in `api/db.py`, the auth guard + admin
+endpoints in `routes.py`, `passlib[bcrypt]` to `pyproject.toml`, and the login /
+change-password / `/admin` screens in `ui2/`. Otherwise pick up Phase 4 or 5.
+
+### Handoff (for the next Claude CLI session)
+
+- **Integration branch is `dev`.** This work is in a PR from
+  `claude/phase-3-ui2-nextjs` → `dev`; everything funnels through `dev`.
+  **Start your next branch from `dev`** (`git fetch origin && git switch -c
+  <new-branch> origin/dev`) once this PR is merged, so you pick up the
+  config-reload + Phase 7 planning already landed here.
+- **What's already on this branch (in the PR):** (1) `GET /api/configs/{name}`
+  + ui2 editor reload — shipped, tested, green; (2) Phase 7 planning docs only
+  (`docs/phase-7.md`, ADR-045, `phase-plan.md`, `CLAUDE.md` table) — **no Phase 7
+  code yet**.
+- **Resume point:** Phase 7 is agreed and documented but unimplemented. Pick it
+  up from `docs/phase-7.md` / ADR-045, or take Phase 4 / Phase 5. Re-read this
+  entry and `docs/phase-plan.md` before starting.
+
+---
+
+## Session: 2026-05-30 (ui2 — Next.js dashboard + SQLite history index; Phase 5 planned)
+
+**Branch:** `claude/phase-3-ui2-nextjs` (cut from `origin/dev`)
+**Phase:** 3 (web UI) — second UI + SQLite history; plus Phase 5 doc
+**Status:** Shipped + verified end-to-end. 247 Python tests pass (was 232;
++15 new); `black` / `flake8` / `python -m mypy src` clean; `ui2` `tsc --noEmit`
+and `next build` clean. Live smoke: backend on :8000 + `ui2` on :3000 — saved a
+config, ran the samples, and confirmed `/api/dashboard` + `/api/history` +
+`/runs/[id]` reflect the run (incl. per-segment mismatch rollup) through the
+Next.js `/api` proxy. Vue `ui/` untouched.
+
+### Heads-up on branching
+
+The harness assigned `claude/python-parallelism-multicore-KCUKA`, but that branch
+is a stale **ancestor of `dev`** (0 ahead / 34 behind) and predates all the
+Phase-2/3 work. Per the operator, work was done on a **new branch off `dev`**
+(`claude/phase-3-ui2-nextjs`). Do not resurrect the KCUKA branch.
+
+### What was completed
+
+- **SQLite index (ADR-043).** New `src/segment_compare/api/db.py` (stdlib
+  `sqlite3`, no new dep): `runs` / `run_segments` / `configs` tables, WAL,
+  schema created via FastAPI lifespan. Dual-written from `POST /api/configs`
+  (`record_config`) and `POST /api/runs` (`record_run`, which reads the run's
+  `summary.json`). All writes are best-effort/non-fatal — the filesystem
+  (ADR-041) stays the source of truth; `backfill_from_disk` can reseed. New
+  endpoints: `GET /api/dashboard`, `GET /api/history?limit=&offset=&q=`,
+  `GET /api/history/{id}`. `:3000` added to dev CORS. Tests: `tests/test_api_db.py`
+  (unit) + `tests/test_api_dashboard.py` (TestClient E2E against the samples).
+- **`ui2/` (ADR-044).** Next.js (App Router) + TS + Tailwind + Recharts +
+  next-themes; lightweight shadcn-style local UI primitives (no Radix). Sidebar:
+  Dashboard · Field Comparator · History · Config. Field Comparator shows every
+  segment with its size (key segment TU4R first), per-field **Exclude** checkbox
+  **off by default** (sends explicit `exclude_overrides=false` so template
+  excludes can't silently drop fields), **no exclude control on the key field**,
+  add-field on the key segment, key-field picker, byte ruler. Runs via existing
+  `POST /api/configs` + `POST /api/runs`. Dev proxies `/api/*` → `:8000`.
+- **Docs:** ADR-043 + ADR-044 in `decisions.md`; `phase-3.md`, `phase-plan.md`
+  (Phase 3 updated; **Phase 5** added), `architecture.md` updated. New
+  `docs/phase-5.md` captures the deferred **parallelism-efficiency** work
+  (Phase 2 shipped parallelism at 1.84×@4w; Phase 5 = profile + load-balance +
+  cut IPC to approach the 3M-record target). `.gitignore`: `*.db*`, `.next/`,
+  `*.tsbuildinfo`, `.env.local`.
+
+### What's pending
+
+- Browser (not just HTTP) walkthrough of `ui2` interactions; optional Playwright.
+- Config page currently lists saved configs and "opens" them by prefilling the
+  name in the comparator (the editor starts fresh). A `GET /api/configs/{name}`
+  returning the stored `payload_json` would let `ui2` repopulate the editor —
+  the DB already stores it. Nice-to-have.
+- Phase 5 is documented only — not started.
+
+### Blockers
+
+None. (Env quirks handled: this box's `mypy` on PATH can't see fastapi — use
+`python -m mypy src`; bleeding-edge starlette needs `httpx2` for TestClient.)
+
+### Next concrete action
+
+Push `claude/phase-3-ui2-nextjs`. If the operator wants the editor to reload a
+saved config's field choices, add `GET /api/configs/{name}` (return
+`configs.payload_json`) and wire it into `ui2`'s Config → comparator "Open".
+Otherwise pick up Phase 4 (service mode) or Phase 5 (parallelism efficiency).
+
+---
+
 ## Session: 2026-05-29 (ADR-041 — Run History (dir-driven), nav .env toggles, report polish)
 
 **Branch:** `dev`

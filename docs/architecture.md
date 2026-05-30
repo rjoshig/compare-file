@@ -38,8 +38,13 @@
 
        Entry points (all wrap the same engine):
          - CLI (Phase 1)        : src/segment_compare/__main__.py
-         - FastAPI (Phase 3)    : src/segment_compare/api/
+         - FastAPI (Phase 3)    : src/segment_compare/api/  (+ SQLite index, ADR-043)
          - Service (Phase 4)    : src/segment_compare/service.py
+
+       Front-ends (both consume the same FastAPI /api):
+         - ui/  : Vue 3 + PrimeVue SPA (config / run / results)
+         - ui2/ : Next.js + Tailwind + Recharts dashboard
+                  (Dashboard / Field Comparator / History / Config; ADR-044)
 ```
 
 ## Modules
@@ -54,7 +59,7 @@
 | `pipeline.py` | Orchestrates: index-build → dup filter → inner-join iteration → compare → write. Single function `run(file_a, file_b, config, output_dir)`. |
 | `config.py` | Loads and validates the three JSON config files. Computes a SHA-256 of the merged config for the run audit trail. |
 | `__main__.py` | CLI (argparse), wraps `pipeline.run`. |
-| `api/` | Phase 3 FastAPI app, wraps `pipeline.run`. `api/storage.py` projects the UI's per-side config (template overrides, appended fields, **segment aliases**) into the engine's on-disk layout schema — including emitting the `segment_aliases` block and cloning a wire segment's fields into its logical alias segment (ADR-034 / ADR-039). |
+| `api/` | Phase 3 FastAPI app, wraps `pipeline.run`. `api/storage.py` projects the UI's per-side config (template overrides, appended fields, **segment aliases**) into the engine's on-disk layout schema — including emitting the `segment_aliases` block and cloning a wire segment's fields into its logical alias segment (ADR-034 / ADR-039). `api/db.py` is a stdlib-sqlite3 **index** (ADR-043) dual-written on config-save / run-complete; it powers `GET /api/dashboard`, `/api/history`, `/api/history/{id}`. The filesystem stays the source of truth; the index is best-effort and rebuildable. |
 | `service.py` | Phase 4 directory-watcher entry point, wraps `pipeline.run`. |
 
 ## Data flow per comparison

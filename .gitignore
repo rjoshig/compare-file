@@ -47,12 +47,23 @@ dmypy.json
 # Jupyter
 .ipynb_checkpoints/
 
-# Node / Vue (Phase 3)
+# Node / Vue (Phase 3) + Next.js ui2
 node_modules/
 dist/
 .vite/
 *.local
 .eslintcache
+# Next.js (ui2) build + env
+.next/
+ui2/out/
+.env.local
+next-env.d.ts
+*.tsbuildinfo
+
+# SQLite index (ADR-043) — generated, never tracked
+*.db
+*.db-wal
+*.db-shm
 
 # Run outputs — never commit comparison results
 results/

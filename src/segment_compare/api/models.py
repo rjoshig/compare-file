@@ -192,6 +192,86 @@ class RunHistoryListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# SQLite-backed history + dashboard (ADR-043) — consumed by ui2
+# ---------------------------------------------------------------------------
+
+
+class DbRunSegment(BaseModel):
+    """One per-segment rollup row for a run, from the SQLite index."""
+
+    segment_name: str
+    match_count: int
+    mismatch_count: int
+    total_in_a: int
+    total_in_b: int
+
+
+class DbRunEntry(BaseModel):
+    """One run as stored in the SQLite index (full history, queryable)."""
+
+    id: int
+    run_dir_name: str
+    run_dir_path: str
+    output_dir: str | None = None
+    report_url: str | None = None
+    config_name: str | None = None
+    file_a: str | None = None
+    file_b: str | None = None
+    created_at: str | None = None
+    records_matched: int = 0
+    records_mismatched: int = 0
+    keys_in_a_only: int = 0
+    keys_in_b_only: int = 0
+    dups_in_a: int = 0
+    dups_in_b: int = 0
+    elapsed_seconds: float = 0.0
+    throughput_rps: float = 0.0
+
+
+class HistoryListResponse(BaseModel):
+    """GET /api/history — a page of runs plus total/limit/offset for paging."""
+
+    runs: list[DbRunEntry]
+    total: int
+    limit: int
+    offset: int
+
+
+class RunDetailResponse(DbRunEntry):
+    """GET /api/history/{id} — a run plus its per-segment rollup."""
+
+    config_audit_hash: str | None = None
+    engine_version: str | None = None
+    segments: list[DbRunSegment] = Field(default_factory=list)
+
+
+class SegmentMismatch(BaseModel):
+    """Total mismatches for one segment across all indexed runs."""
+
+    segment_name: str
+    mismatch_count: int
+
+
+class DashboardTotals(BaseModel):
+    """Headline counts aggregated across every indexed run."""
+
+    total_runs: int = 0
+    total_matched: int = 0
+    total_mismatched: int = 0
+    total_orphans: int = 0
+    total_dups: int = 0
+
+
+class DashboardResponse(BaseModel):
+    """GET /api/dashboard — aggregates powering the ui2 dashboard."""
+
+    last_run: DbRunEntry | None = None
+    recent_runs: list[DbRunEntry] = Field(default_factory=list)
+    totals: DashboardTotals = Field(default_factory=DashboardTotals)
+    mismatches_by_segment: list[SegmentMismatch] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Error envelope
 # ---------------------------------------------------------------------------
 

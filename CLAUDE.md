@@ -24,14 +24,18 @@ next concrete action. Without this the next session starts blind.
 
 ## Phase gating
 
-Work proceeds in four phases. They are sequential, not parallel:
+Work proceeds in sequential phases (see `docs/phase-plan.md` for the master
+overview and status). They are sequential, not parallel:
 
 | Phase | Theme | Doc |
 |---|---|---|
 | 1 | Core engine (POC, single process, 10K records) | `docs/phase-1.md` |
 | 2 | Production scale + field-level config | `docs/phase-2.md` |
-| 3 | Vue.js + FastAPI web UI | `docs/phase-3.md` |
+| 3 | Vue.js + FastAPI web UI (+ Next.js `ui2/`) | `docs/phase-3.md` |
 | 4 | Scheduled service mode | `docs/phase-4.md` |
+| 5 | Parallelism & throughput efficiency | `docs/phase-5.md` |
+| 6 | _(reserved — unallocated)_ | — |
+| 7 | Multi-user hosting & authentication | `docs/phase-7.md` |
 
 Never start work on a later phase before the current phase's acceptance
 criteria are met. If you think you need to, raise the question with the

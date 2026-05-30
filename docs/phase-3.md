@@ -146,6 +146,23 @@ ui/
 - Run state is persisted to SQLite on every status transition so the
   UI survives backend restarts.
 
+## Second UI + SQLite history (added after the Vue `ui/` shipped)
+
+Both additions keep the Vue `ui/` and every existing endpoint untouched:
+
+- **SQLite index (ADR-043).** `api/db.py` (stdlib `sqlite3`) is dual-written on
+  config-save and run-complete, realizing this phase's "SQLite for run history"
+  scope as a queryable index *alongside* the ADR-041 directory-driven history
+  (which remains the source of truth). New endpoints: `GET /api/dashboard`,
+  `GET /api/history?limit=&offset=&q=`, `GET /api/history/{id}`. Writes are
+  best-effort / non-fatal; the index is rebuildable from disk.
+- **`ui2/` (ADR-044).** A second, visual front-end — Next.js + Tailwind +
+  Recharts, dark/light — with a Dashboard, a **Field Comparator** (shows every
+  segment + size, key segment first; per-field Exclude defaults off so
+  everything is compared; the key field has no exclude control; add fields to
+  the key segment), History, and Config. It consumes the same `/api`; in dev it
+  proxies `/api/*` to `:8000` (no CORS). See `ui2/README.md`.
+
 ## Ordered task list
 
 1. FastAPI scaffolding + health endpoint + `/docs` reachable.
