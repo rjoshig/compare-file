@@ -1771,3 +1771,77 @@ which broke on the quoted ``"JetBrains Mono"`` font name).
 **Consequences:** select-all + copy from the block yields clean, one-record-
 per-line text. Long records scroll horizontally instead of reflowing. The
 full, untruncated data still lives in ``mismatches.dat`` (linked).
+
+## ADR-043 — SQLite index for configs + full run history (alongside ADR-041)
+
+**Status:** accepted; extends ADR-041 (directory-driven run history)
+
+**Context:** ADR-041 made run history *directory-driven* with zero stored
+state — `GET /api/runs?output_dir=` scans the newest five `report-*` subdirs of
+one chosen directory and reads each `summary.json`. That is perfect for the Vue
+`ui/` "what's in this folder" view, but the second UI (`ui2/`, ADR-044) needs a
+**dashboard and full, searchable history** spanning *all* runs and aggregating
+per-segment mismatch totals. Re-scanning arbitrary directories per request
+doesn't give us cross-run aggregates or pagination, and the operator explicitly
+asked for "some database within it."
+
+**Decision:**
+
+1. **SQLite as a queryable index, not a new source of truth.** A new
+   `api/db.py` (stdlib `sqlite3`, **no new dependency**) maintains three tables:
+   `runs` (headline metrics per run), `run_segments` (per-segment match/mismatch
+   rollup), and `configs` (mirror of saved configs). The filesystem
+   (`user_configs/`, `report-*/summary.json`) stays authoritative; the DB can be
+   rebuilt from disk via `backfill_from_disk`.
+2. **Dual-write, best-effort.** `POST /api/configs` and `POST /api/runs` call
+   `db.record_config` / `db.record_run` after the existing filesystem work.
+   Every DB write is wrapped so failures are logged and swallowed — the index
+   being unavailable or corrupt must never break the core flow or the Vue `ui/`.
+   `record_run` reads the run's `summary.json` (decoupled from the engine).
+3. **New endpoints for `ui2`** (additive, no collision with existing routes):
+   `GET /api/dashboard` (last run, recent runs, totals, mismatches-by-segment),
+   `GET /api/history?limit=&offset=&q=` (paginated, searchable), and
+   `GET /api/history/{id}` (run + per-segment detail). `GET /api/runs` (ADR-041)
+   is untouched.
+4. **Location + lifecycle.** DB path = `SEGCMP_DB_PATH` env or
+   `./segment_compare.db`; WAL mode; schema created on app startup via the
+   FastAPI lifespan. `*.db*` is gitignored.
+
+**Consequences:** `ui2` gets cross-run aggregates and search without per-request
+directory scans; the Vue `ui/` and all existing endpoints are unchanged; and
+because the index is derived, a lost/corrupt DB is a non-event — delete it and it
+re-seeds on the next run (or via backfill).
+
+## ADR-044 — Second UI (`ui2/`, Next.js) alongside the Vue `ui/`
+
+**Status:** accepted
+
+**Context:** The Phase-3 Vue `ui/` (PrimeVue) covers config + run + results. The
+operator asked for a *more visual* second UI: a dashboard with charts, an
+easy-to-run comparator that shows every segment and its size with per-field
+exclude checkboxes, plus history and config screens — without disturbing the
+existing UI.
+
+**Decision:**
+
+1. **A new, parallel front-end in `ui2/`** (Next.js App Router + TypeScript +
+   Tailwind + shadcn/ui, dark/light via `next-themes`, charts via Recharts). It
+   is a *sibling* of `ui/`; both consume the same FastAPI `/api`. `ui/` is left
+   entirely untouched.
+2. **No browser CORS in dev:** `ui2` proxies `/api/*` to `:8000` via Next.js
+   rewrites (mirroring Vite's proxy). `:3000` is also added to the backend CORS
+   allow-list as a fallback for direct calls.
+3. **Sidebar:** Dashboard · Field Comparator · History · Config.
+4. **Field Comparator contract:** render **every** segment with its size, key
+   segment (TU4R) first; each field gets an **exclude** checkbox that
+   **defaults to false** (everything compared by default) — `ui2` sends explicit
+   `exclude_overrides[seg.field]=false` for unchecked fields so template
+   `exclude:true` defaults don't silently drop fields. The **key field shows no
+   exclude control** (always included). "Add field" appends to the key segment
+   (`added_fields`); the chosen `key_field_name` is promoted on save. Runs go
+   through the existing `POST /api/configs` + `POST /api/runs`; dashboard/history
+   are read from the ADR-043 index.
+
+**Consequences:** two UIs to keep working against one API contract; `ui2` is the
+visual/dashboard surface, `ui/` remains the reference implementation. Long runs
+still block (no SSE) — `ui2` shows a spinner, matching current behavior.
