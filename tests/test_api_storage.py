@@ -19,6 +19,7 @@ from segment_compare.api import storage  # noqa: E402
 from segment_compare.api.models import (  # noqa: E402
     AliasSegmentDecl,
     FileSideConfig,
+    TemplateField,
 )
 from segment_compare.layout import load_file_layout  # noqa: E402
 
@@ -130,6 +131,50 @@ def test_operator_alias_unknown_wire_rejected() -> None:
     )
     with pytest.raises(storage.StorageError):
         storage._build_engine_layout(side, tb.layout_a)
+
+
+# ---------------------------------------------------------------------------
+# Reload a saved config (GET /api/configs/{name}) — reverse the projection
+# ---------------------------------------------------------------------------
+
+
+def test_load_saved_config_round_trips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """save_config → load_saved_config reproduces the editor's field choices."""
+    monkeypatch.setenv("SEGCMP_USER_CONFIGS_DIR", str(tmp_path / "user_configs"))
+    tb = storage.load_template_bundle()
+    key_seg = next(s for s in tb.layout_a.segments if s.role == "key")
+    other_seg = next(s for s in tb.layout_a.segments if s.role != "key" and s.fields)
+    excl_key = f"{other_seg.name}.{other_seg.fields[0].name}"
+
+    side_a = FileSideConfig(
+        file_path="/data/a.dat",
+        key_field_name="account_nbr",
+        exclude_overrides={excl_key: True},
+        added_fields={key_seg.name: [TemplateField(name="pad9", length=9)]},
+    )
+    side_b = FileSideConfig(file_path="/data/b.dat", key_field_name="account_nbr")
+    storage.save_config("cfg1", side_a, side_b)
+
+    loaded = storage.load_saved_config("cfg1")
+    assert loaded.name == "cfg1"
+    assert loaded.file_a.file_path == "/data/a.dat"
+    assert loaded.file_a.key_field_name == "account_nbr"
+    assert loaded.file_a.exclude_overrides[excl_key] is True
+    assert [f.name for f in loaded.file_a.added_fields[key_seg.name]] == ["pad9"]
+    # The key field never appears as an exclude override.
+    assert f"{key_seg.name}.account_nbr" not in loaded.file_a.exclude_overrides
+
+    # Strong check: re-projecting the reloaded config reproduces the saved layout.
+    assert storage._build_engine_layout(loaded.file_a, tb.layout_a) == storage._build_engine_layout(
+        side_a, tb.layout_a
+    )
+
+
+def test_load_saved_config_missing_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unknown config name raises StorageError (surfaced as 404 by the route)."""
+    monkeypatch.setenv("SEGCMP_USER_CONFIGS_DIR", str(tmp_path / "user_configs"))
+    with pytest.raises(storage.StorageError):
+        storage.load_saved_config("does-not-exist")
 
 
 # ---------------------------------------------------------------------------

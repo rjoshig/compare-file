@@ -37,6 +37,18 @@ export function isCurrentKey(
   return !!keySeg && keySeg.name === segName && state.keyFieldName === fieldName;
 }
 
+export function sideConfigToState(cfg: FileSideConfig): SideEditorState {
+  // Inverse of buildSideConfig: repopulate the editor from a saved config so
+  // "Open" in Config / "Re-run" in History lands on the exact field choices.
+  return {
+    filePath: cfg.file_path,
+    excludes: { ...cfg.exclude_overrides },
+    addedFields: { ...cfg.added_fields },
+    keyFieldName: cfg.key_field_name,
+    inputSorted: cfg.sort?.input_sorted ?? true,
+  };
+}
+
 export function buildSideConfig(layout: TemplateLayout, state: SideEditorState): FileSideConfig {
   const overrides: Record<string, boolean> = {};
   for (const seg of layout.segments) {

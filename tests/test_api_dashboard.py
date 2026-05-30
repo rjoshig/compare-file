@@ -101,6 +101,23 @@ def test_config_indexed_after_save(client: TestClient, tmp_path: Path) -> None:
     assert any(c["name"] == "samples" for c in listed)
 
 
+def test_get_config_reloads_saved_config(client: TestClient, tmp_path: Path) -> None:
+    """GET /api/configs/{name} returns the saved config in UI shape."""
+    _save_and_run(client, tmp_path / "runs")
+    resp = client.get("/api/configs/samples")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "samples"
+    assert body["file_a"]["file_path"] == str(SAMPLE_A)
+    assert body["file_a"]["key_field_name"] == "account_nbr"
+    assert body["file_b"]["file_path"] == str(SAMPLE_B)
+
+
+def test_get_config_404_for_unknown(client: TestClient) -> None:
+    """An unknown config name returns 404."""
+    assert client.get("/api/configs/nope").status_code == 404
+
+
 def test_empty_dashboard_is_well_formed(client: TestClient) -> None:
     """With no runs the dashboard returns zeroed totals and empty lists."""
     dash = client.get("/api/dashboard").json()

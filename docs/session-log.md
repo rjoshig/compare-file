@@ -9,6 +9,55 @@ what's pending, blockers, next concrete action.
 
 ---
 
+## Session: 2026-05-30 (ui2 — reload a saved config into the editor)
+
+**Branch:** `claude/phase-3-ui2-nextjs`
+**Phase:** 3 (web UI) — closing the ui2 config-reload gap
+**Status:** Shipped + verified. 251 Python tests pass (was 247; +4 new);
+`black` / `flake8` / `python -m mypy src` clean; `ui2` `tsc --noEmit` +
+`next build` clean. Live HTTP smoke: saved a config with excludes + an added
+key field, `GET /api/configs/{name}` reloaded it faithfully; unknown name 404s.
+
+### What was completed
+
+- **`GET /api/configs/{name}`** (`routes.py`) returns a saved config in UI/wire
+  shape so the editor can reopen it. Backed by new
+  `storage.load_saved_config()` + `_reconstruct_side()` which *reverse* the
+  UI→engine projection in `_build_engine_layout`: it reads the on-disk engine
+  layouts (ADR-041 source of truth) and rebuilds per-field exclude choices,
+  fields added to the key segment, the chosen key field, strip/RDW/sort blocks,
+  and operator-declared aliases. Works for every saved config, including ones
+  predating the SQLite index (so no dependence on `configs.payload_json`).
+- **ui2 wiring:** `api.getConfig()`, `editor.sideConfigToState()` (inverse of
+  `buildSideConfig`), and the comparator page now loads `?config=NAME` into both
+  sides (Config → "Open" and History → "Re-run" now repopulate the editor, not
+  just the name). Falls back to empty defaults if the config can't be read.
+- **Tests:** `test_api_storage.py` round-trip + missing-config cases;
+  `test_api_dashboard.py` endpoint 200/404 cases.
+
+### What's pending
+
+- Browser-level walkthrough of ui2 (optional Playwright) still outstanding.
+- **Phase 7 (proposed): multi-user hosting + auth.** Operator wants the tool
+  usable by concurrent users on a Linux host: per-user login, a single small
+  admin-only page to create users + issue initial passwords + reset/regenerate
+  passwords, and forced password change on first login. No broader RBAC (just
+  user vs admin). Discussed this session; **doc not yet written** — agree on the
+  approach first, then write `docs/phase-7.md` + ADR(s) + phase-plan row.
+- Phase 4 (service mode) and Phase 5 (parallelism efficiency) still not started.
+
+### Blockers
+
+None.
+
+### Next concrete action
+
+Agree on the Phase 7 auth/hosting approach with the operator, then write
+`docs/phase-7.md`, add ADR(s) in `decisions.md`, and add the Phase 7 row to
+`phase-plan.md`. Otherwise pick up Phase 4 or Phase 5.
+
+---
+
 ## Session: 2026-05-30 (ui2 — Next.js dashboard + SQLite history index; Phase 5 planned)
 
 **Branch:** `claude/phase-3-ui2-nextjs` (cut from `origin/dev`)

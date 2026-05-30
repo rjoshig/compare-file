@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { FolderOpen, Play, Save } from "lucide-react";
 import { api } from "@/lib/api";
 import type { RunResponse, TemplateBundle } from "@/lib/types";
-import { buildSideConfig, defaultSideState, type SideEditorState } from "@/lib/editor";
+import { buildSideConfig, defaultSideState, sideConfigToState, type SideEditorState } from "@/lib/editor";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -44,21 +44,40 @@ function ComparatorInner() {
   const [runError, setRunError] = React.useState<string | null>(null);
   const [result, setResult] = React.useState<RunResponse | null>(null);
 
+  // Load templates, then — if arriving via Config "Open" / History "Re-run"
+  // (?config=NAME) — repopulate both sides from the saved config. Falls back to
+  // empty defaults if the config can't be loaded.
   React.useEffect(() => {
-    api
-      .templateLayouts()
-      .then((t) => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const t = await api.templateLayouts();
+        if (cancelled) return;
         setTpl(t);
+
+        const name = params.get("config");
+        if (name) {
+          setConfigName(name);
+          try {
+            const saved = await api.getConfig(name);
+            if (cancelled) return;
+            setStateA(sideConfigToState(saved.file_a));
+            setStateB(sideConfigToState(saved.file_b));
+            return;
+          } catch {
+            /* fall through to defaults if the saved config can't be read */
+          }
+        }
+        if (cancelled) return;
         setStateA(defaultSideState(t.layout_a));
         setStateB(defaultSideState(t.layout_b));
-      })
-      .catch((e) => setError(String(e.message ?? e)));
-  }, []);
-
-  // Prefill the config name when arriving from History "Re-run".
-  React.useEffect(() => {
-    const c = params.get("config");
-    if (c) setConfigName(c);
+      } catch (e) {
+        if (!cancelled) setError(String((e as Error).message ?? e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [params]);
 
   const canRun =

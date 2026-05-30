@@ -45,6 +45,9 @@ export const api = {
   listConfigs: () =>
     http<{ configs: SavedConfigSummary[] }>("/api/configs"),
 
+  getConfig: (name: string) =>
+    http<SaveConfigRequest>(`/api/configs/${encodeURIComponent(name)}`),
+
   run: (config_name: string, output_dir: string) =>
     http<RunResponse>("/api/runs", {
       method: "POST",

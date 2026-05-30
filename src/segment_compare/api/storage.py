@@ -36,8 +36,13 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from segment_compare.api.models import (
+    AliasSegmentDecl,
     FileSideConfig,
+    RdwBlock,
+    SaveConfigRequest,
     SavedConfigSummary,
+    SortBlock,
+    StripBlock,
     TemplateBundle,
     TemplateField,
     TemplateLayout,
@@ -222,6 +227,156 @@ def config_dir_for(name: str) -> Path:
     if not cfg_dir.exists():
         raise StorageError(f"Config {safe_name!r} does not exist.")
     return cfg_dir
+
+
+def load_saved_config(name: str) -> SaveConfigRequest:
+    """Reconstruct the UI-shape config for ``name`` from its on-disk layouts.
+
+    The on-disk engine layouts (ADR-033) are the source of truth (ADR-041);
+    this reverses the UI→engine projection in :func:`_build_engine_layout` so
+    the ``ui2`` editor can reopen a saved config. It round-trips everything the
+    editor cares about — file paths, per-field exclude choices, fields added to
+    the key segment, the chosen key field, and the input-sorted flag — plus the
+    strip/RDW/sort/alias blocks for completeness.
+
+    Args:
+        name: Saved config directory name.
+
+    Returns:
+        The reconstructed :class:`SaveConfigRequest`.
+
+    Raises:
+        StorageError: If the config or its layout files are missing.
+    """
+    cfg_dir = config_dir_for(name)
+    meta_path = cfg_dir / "meta.json"
+    if not meta_path.exists():
+        raise StorageError(f"Config {name!r} is missing meta.json.")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    templates = load_template_bundle()
+    return SaveConfigRequest(
+        name=meta.get("name", name),
+        file_a=_reconstruct_side(
+            cfg_dir / "layout_file_A.json", templates.layout_a, meta.get("file_a_path", "")
+        ),
+        file_b=_reconstruct_side(
+            cfg_dir / "layout_file_B.json", templates.layout_b, meta.get("file_b_path", "")
+        ),
+    )
+
+
+def _reconstruct_side(
+    layout_path: Path, template: TemplateLayout, file_path: str
+) -> FileSideConfig:
+    """Reverse :func:`_build_engine_layout` for one side into a FileSideConfig."""
+    if not layout_path.exists():
+        raise StorageError(f"Saved layout missing on disk: {layout_path}")
+    raw: dict[str, Any] = json.loads(layout_path.read_text(encoding="utf-8"))
+    ondisk_by_name = {s["name"]: s for s in raw.get("segments", [])}
+
+    # The chosen key field lives on the role=key segment; find it first so we can
+    # omit it from exclude_overrides (the key is always compared, never excluded).
+    key_field_name = _find_key_field(template, ondisk_by_name)
+
+    exclude_overrides: dict[str, bool] = {}
+    added_fields: dict[str, list[TemplateField]] = {}
+    for seg in template.segments:
+        od = ondisk_by_name.get(seg.name)
+        if od is None:
+            continue
+        od_fields = od.get("fields", [])
+        od_by_name = {f["name"]: f for f in od_fields}
+        tpl_field_names = {f.name for f in seg.fields}
+        for fld in seg.fields:
+            if seg.role == "key" and fld.name == key_field_name:
+                continue  # key field carries no exclude override
+            odf = od_by_name.get(fld.name)
+            if odf is not None:
+                exclude_overrides[f"{seg.name}.{fld.name}"] = bool(odf.get("exclude", False))
+        # Only the key segment gains user-added fields in the UI; mirror that.
+        if seg.role == "key":
+            extras = [
+                TemplateField(
+                    name=odf["name"],
+                    length=int(odf["length"]),
+                    exclude=bool(odf.get("exclude", False)),
+                    key=bool(odf.get("key", False)),
+                )
+                for odf in od_fields
+                if odf["name"] not in tpl_field_names
+            ]
+            if extras:
+                added_fields[seg.name] = extras
+
+    return FileSideConfig(
+        file_path=file_path,
+        strip_leading_bytes=_strip_block(raw.get("strip_leading_bytes")),
+        rdw=_rdw_block(raw.get("rdw")),
+        sort=_sort_block(raw.get("sort", {})),
+        exclude_overrides=exclude_overrides,
+        added_fields=added_fields,
+        key_field_name=key_field_name,
+        alias_segments=_operator_aliases(raw.get("segment_aliases", []), template),
+    )
+
+
+def _find_key_field(template: TemplateLayout, ondisk_by_name: dict[str, Any]) -> str:
+    """Return the name of the field flagged ``key`` on the role=key segment."""
+    for seg in template.segments:
+        if seg.role != "key":
+            continue
+        od = ondisk_by_name.get(seg.name)
+        if od is None:
+            continue
+        for fld in od.get("fields", []):
+            if fld.get("key"):
+                return str(fld["name"])
+    return ""
+
+
+def _strip_block(raw: dict[str, Any] | None) -> StripBlock:
+    if not raw:
+        return StripBlock()
+    return StripBlock(
+        enabled=True,
+        size=raw.get("size"),
+        encoding=raw.get("encoding", "binary"),
+    )
+
+
+def _rdw_block(raw: dict[str, Any] | None) -> RdwBlock:
+    if not raw:
+        return RdwBlock()
+    return RdwBlock(
+        enabled=True,
+        rdw1_bytes=raw.get("rdw1_bytes"),
+        rdw2_bytes=raw.get("rdw2_bytes"),
+        encoding=raw.get("encoding", "binary_le_uint"),
+    )
+
+
+def _sort_block(raw: dict[str, Any]) -> SortBlock:
+    return SortBlock(
+        input_sorted=bool(raw.get("input_sorted", True)),
+        order=raw.get("order", "ascending"),
+        key_type=raw.get("key_type", "alphanumeric"),
+    )
+
+
+def _operator_aliases(
+    raw_aliases: list[dict[str, Any]], template: TemplateLayout
+) -> list[AliasSegmentDecl]:
+    """Aliases on disk minus those baked into the template (one rule per wire)."""
+    baked = {a.wire_name for a in template.segment_aliases}
+    return [
+        AliasSegmentDecl(
+            logical_name=a["logical_name"],
+            wire_name=a["wire_name"],
+            after_segment=a["after_segment"],
+        )
+        for a in raw_aliases
+        if a.get("wire_name") not in baked
+    ]
 
 
 # ---------------------------------------------------------------------------

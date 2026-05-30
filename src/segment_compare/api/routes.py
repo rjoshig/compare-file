@@ -63,6 +63,20 @@ def list_configs() -> SavedConfigListResponse:
     return SavedConfigListResponse(configs=storage.list_configs())
 
 
+@router.get("/configs/{name}", response_model=SaveConfigRequest)
+def get_config(name: str) -> SaveConfigRequest:
+    """Return one saved config in UI (wire) shape so the editor can reopen it.
+
+    Reconstructs the per-side field choices (excludes, added key fields, key
+    field, sort) from the on-disk engine layouts (ADR-041 source of truth), so
+    it works for every saved config — including ones predating the SQLite index.
+    """
+    try:
+        return storage.load_saved_config(name)
+    except storage.StorageError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/runs", response_model=RunResponse)
 def run_compare(body: RunRequest) -> RunResponse:
     """Invoke the engine for a saved config and return the run summary."""
