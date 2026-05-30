@@ -58,6 +58,7 @@ dist/
 ui2/out/
 .env.local
 next-env.d.ts
+*.tsbuildinfo
 
 # SQLite index (ADR-043) — generated, never tracked
 *.db
